@@ -1,0 +1,3399 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crónicas del Grial</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #0a0a0a;
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+        }
+
+        #gameContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            background: #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <script>
+        // ==================== CONFIGURACIÓN ====================
+        const CONFIG = {
+            CANVAS_WIDTH: 1280,
+            CANVAS_HEIGHT: 720,
+            TILE_SIZE: 32,
+            SPRITE_SIZE: 16,
+            GAME_SPEED: 1000 / 60 // 60 FPS
+        };
+
+        // ==================== UTILIDADES ====================
+        class Vector2 {
+            constructor(x = 0, y = 0) {
+                this.x = x;
+                this.y = y;
+            }
+
+            add(v) {
+                return new Vector2(this.x + v.x, this.y + v.y);
+            }
+
+            subtract(v) {
+                return new Vector2(this.x - v.x, this.y - v.y);
+            }
+
+            multiply(scalar) {
+                return new Vector2(this.x * scalar, this.y * scalar);
+            }
+
+            distance(v) {
+                const dx = this.x - v.x;
+                const dy = this.y - v.y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            normalize() {
+                const len = Math.sqrt(this.x * this.x + this.y * this.y);
+                if (len === 0) return new Vector2(0, 0);
+                return new Vector2(this.x / len, this.y / len);
+            }
+
+            length() {
+                return Math.sqrt(this.x * this.x + this.y * this.y);
+            }
+        }
+
+        // ==================== FLOATING TEXT ====================
+        class FloatingText {
+            constructor(x, y, text, color, lifetime = 1) {
+                this.position = new Vector2(x, y);
+                this.text = text;
+                this.color = color;
+                this.lifetime = lifetime;
+                this.maxLifetime = lifetime;
+                this.velocity = new Vector2(0, -80);
+            }
+
+            update(dt) {
+                this.lifetime -= dt;
+                this.position = this.position.add(this.velocity.multiply(dt));
+            }
+
+            draw(ctx) {
+                const alpha = this.lifetime / this.maxLifetime;
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = this.color;
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.text, this.position.x, this.position.y);
+                ctx.globalAlpha = 1;
+            }
+
+            isAlive() {
+                return this.lifetime > 0;
+            }
+        }
+
+        // ==================== SISTEMA DE PARTÍCULAS ====================
+        class Particle {
+            constructor(x, y, vx, vy, lifetime, color, size = 4, alpha = 1) {
+                this.position = new Vector2(x, y);
+                this.velocity = new Vector2(vx, vy);
+                this.lifetime = lifetime;
+                this.maxLifetime = lifetime;
+                this.color = color;
+                this.size = size;
+                this.initialAlpha = alpha;
+                this.gravity = 0;
+            }
+
+            update(dt) {
+                this.lifetime -= dt;
+                this.position = this.position.add(this.velocity.multiply(dt));
+                this.velocity.y += this.gravity * dt;
+            }
+
+            draw(ctx) {
+                const alpha = (this.lifetime / this.maxLifetime) * this.initialAlpha;
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.position.x - this.size / 2, this.position.y - this.size / 2, this.size, this.size);
+                ctx.globalAlpha = 1;
+            }
+
+            isAlive() {
+                return this.lifetime > 0;
+            }
+        }
+
+        class ParticleSystem {
+            constructor() {
+                this.particles = [];
+            }
+
+            emit(x, y, vx, vy, lifetime, color, size = 4) {
+                this.particles.push(new Particle(x, y, vx, vy, lifetime, color, size));
+            }
+
+            burst(x, y, count, velocity, lifetime, colors) {
+                for (let i = 0; i < count; i++) {
+                    const angle = (i / count) * Math.PI * 2;
+                    const speed = velocity * (0.7 + Math.random() * 0.3);
+                    const vx = Math.cos(angle) * speed;
+                    const vy = Math.sin(angle) * speed;
+                    const color = colors[Math.floor(Math.random() * colors.length)];
+                    this.emit(x, y, vx, vy, lifetime, color, 3 + Math.random() * 3);
+                }
+            }
+
+            ambient(x, y, vx, vy, lifetime, color, size = 2) {
+                const randomVx = vx + (Math.random() - 0.5) * 20;
+                const randomVy = vy + (Math.random() - 0.5) * 20;
+                this.emit(x, y, randomVx, randomVy, lifetime, color, size);
+            }
+
+            update(dt) {
+                this.particles = this.particles.filter(p => p.isAlive());
+                for (let p of this.particles) {
+                    p.update(dt);
+                }
+            }
+
+            draw(ctx) {
+                for (let p of this.particles) {
+                    p.draw(ctx);
+                }
+            }
+        }
+
+        const particleSystem = new ParticleSystem();
+
+        // ==================== SISTEMA DE AUDIO ====================
+        class AudioSystem {
+            constructor() {
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            playSound(freq, duration, type = 'sine') {
+                const now = this.audioContext.currentTime;
+                const osc = this.audioContext.createOscillator();
+                const gain = this.audioContext.createGain();
+
+                osc.connect(gain);
+                gain.connect(this.audioContext.destination);
+
+                osc.frequency.value = freq;
+                osc.type = type;
+
+                gain.gain.setValueAtTime(0.1, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + duration);
+
+                osc.start(now);
+                osc.stop(now + duration);
+            }
+
+            playSfx(name) {
+                const sfxMap = {
+                    'attack': () => this.playSound(400, 0.1),
+                    'hit': () => {
+                        this.playSound(150, 0.2, 'sawtooth');
+                        setTimeout(() => this.playSound(100, 0.15, 'square'), 50);
+                    },
+                    'enemyHit': () => this.playSound(250, 0.1, 'square'),
+                    'levelup': () => {
+                        this.playSound(500, 0.1);
+                        setTimeout(() => this.playSound(700, 0.1), 100);
+                    },
+                    'special': () => this.playSound(800, 0.2),
+                    'dodge': () => this.playSound(300, 0.08),
+                    'coin': () => this.playSound(900, 0.08),
+                    'menuSelect': () => this.playSound(500, 0.05),
+                    'menuBack': () => this.playSound(250, 0.08, 'square'),
+                    'victory': () => {
+                        this.playSound(500, 0.1);
+                        setTimeout(() => this.playSound(700, 0.1), 100);
+                        setTimeout(() => this.playSound(900, 0.2), 200);
+                    },
+                    'death': () => {
+                        this.playSound(200, 0.3, 'sawtooth');
+                        setTimeout(() => this.playSound(100, 0.4, 'sawtooth'), 150);
+                    }
+                };
+
+                if (sfxMap[name]) sfxMap[name]();
+            }
+        }
+
+        const audioSystem = new AudioSystem();
+
+        // ==================== SISTEMA DE DIFICULTAD ====================
+        const DIFFICULTY_SETTINGS = {
+            FACIL: {
+                name: 'Fácil',
+                enemyHpMultiplier: 1.0,
+                enemyDamageMultiplier: 1.0,
+                enemySpeedMultiplier: 1.0,
+                enemyCountBonus: 0,
+                coinMultiplier: 1.0,
+                color: '#22dd22',
+                colorRGB: { r: 34, g: 221, b: 34 }
+            },
+            INTERMEDIO: {
+                name: 'Intermedio',
+                enemyHpMultiplier: 1.5,
+                enemyDamageMultiplier: 1.3,
+                enemySpeedMultiplier: 1.2,
+                enemyCountBonus: 2,
+                coinMultiplier: 1.0,
+                color: '#ffff44',
+                colorRGB: { r: 255, g: 255, b: 68 }
+            },
+            DIFICIL: {
+                name: 'Difícil',
+                enemyHpMultiplier: 2.2,
+                enemyDamageMultiplier: 1.8,
+                enemySpeedMultiplier: 1.4,
+                enemyCountBonus: 4,
+                coinMultiplier: 1.5,
+                color: '#ff8833',
+                colorRGB: { r: 255, g: 136, b: 51 }
+            },
+            LEYENDA: {
+                name: 'Leyenda',
+                enemyHpMultiplier: 3.5,
+                enemyDamageMultiplier: 2.5,
+                enemySpeedMultiplier: 1.6,
+                enemyCountBonus: 6,
+                coinMultiplier: 2.0,
+                color: '#ff3333',
+                colorRGB: { r: 255, g: 51, b: 51 }
+            }
+        };
+
+        let globalDifficulty = DIFFICULTY_SETTINGS.FACIL;
+
+        // ==================== CLASES DE PERSONAJE ====================
+        const CHARACTER_CLASSES = {
+            CABALLERO: {
+                name: 'Caballero',
+                maxHp: 110,
+                attack: 16,
+                defense: 7,
+                speed: 170,
+                specialCost: 30,
+                specialDamage: 30,
+                color: { r: 200, g: 100, b: 50 },
+                glowColor: '#ff6b35',
+                desc: 'Tanque resistente con ataques poderosos'
+            },
+            MAGO: {
+                name: 'Mago',
+                maxHp: 65,
+                attack: 20,
+                defense: 2,
+                speed: 230,
+                specialCost: 25,
+                specialDamage: 50,
+                color: { r: 100, g: 150, b: 255 },
+                glowColor: '#6495ed',
+                desc: 'Ataque a distancia con magia poderosa'
+            },
+            PICARO: {
+                name: 'Pícaro',
+                maxHp: 75,
+                attack: 10,
+                defense: 3,
+                speed: 300,
+                specialCost: 20,
+                specialDamage: 18,
+                color: { r: 200, g: 200, b: 100 },
+                glowColor: '#ffff66',
+                desc: 'Rápido y ágil, múltiples ataques'
+            },
+            CLERIGO: {
+                name: 'Clérigo',
+                maxHp: 95,
+                attack: 14,
+                defense: 5,
+                speed: 200,
+                specialCost: 35,
+                specialDamage: 0,
+                color: { r: 200, g: 200, b: 200 },
+                glowColor: '#ffffff',
+                desc: 'Sanador con defensa moderada'
+            }
+        };
+
+        // ==================== SISTEMA DE INPUT ====================
+        class InputManager {
+            constructor() {
+                this.keys = {};
+                this.pressedThisFrame = new Set();
+                this.gamepads = [];
+
+                window.addEventListener('keydown', (e) => {
+                    this.keys[e.key] = true;
+                    this.pressedThisFrame.add(e.key);
+                });
+
+                window.addEventListener('keyup', (e) => {
+                    this.keys[e.key] = false;
+                });
+            }
+
+            update() {
+                this.gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+            }
+
+            endFrame() {
+                this.pressedThisFrame.clear();
+            }
+
+            isKeyPressed(key) {
+                const pressed = this.pressedThisFrame.has(key);
+                this.pressedThisFrame.delete(key);
+                return pressed;
+            }
+
+            // Gamepad helpers for menus (any connected gamepad)
+            anyGamepadConfirm() {
+                for (const gp of this.gamepads) {
+                    if (gp && (gp.buttons[0]?.pressed || gp.buttons[2]?.pressed)) return true;
+                }
+                return false;
+            }
+
+            anyGamepadUp() {
+                for (const gp of this.gamepads) {
+                    if (gp && (gp.axes[1] < -0.6 || gp.buttons[12]?.pressed)) return true;
+                }
+                return false;
+            }
+
+            anyGamepadDown() {
+                for (const gp of this.gamepads) {
+                    if (gp && (gp.axes[1] > 0.6 || gp.buttons[13]?.pressed)) return true;
+                }
+                return false;
+            }
+
+            anyGamepadBack() {
+                for (const gp of this.gamepads) {
+                    if (gp && (gp.buttons[1]?.pressed || gp.buttons[8]?.pressed)) return true;
+                }
+                return false;
+            }
+
+            getPlayerInput(playerIndex) {
+                const input = {
+                    up: false,
+                    down: false,
+                    left: false,
+                    right: false,
+                    attack: false,
+                    special: false,
+                    dodge: false
+                };
+
+                // Keyboard (player 1 always, others ignore)
+                if (playerIndex === 0) {
+                    input.up = this.keys['w'] || this.keys['W'] || this.keys['ArrowUp'];
+                    input.down = this.keys['s'] || this.keys['S'] || this.keys['ArrowDown'];
+                    input.left = this.keys['a'] || this.keys['A'] || this.keys['ArrowLeft'];
+                    input.right = this.keys['d'] || this.keys['D'] || this.keys['ArrowRight'];
+                    input.attack = this.keys['j'] || this.keys['J'] || this.keys[' '] || this.keys['Enter'];
+                    input.special = this.keys['k'] || this.keys['K'];
+                    input.dodge = this.keys['l'] || this.keys['L'];
+                }
+
+                // Gamepad (ALL players including player 1)
+                const gamepad = this.gamepads[playerIndex];
+                if (gamepad) {
+                    input.up = input.up || gamepad.axes[1] < -0.4;
+                    input.down = input.down || gamepad.axes[1] > 0.4;
+                    input.left = input.left || gamepad.axes[0] < -0.4;
+                    input.right = input.right || gamepad.axes[0] > 0.4;
+                    input.attack = input.attack || gamepad.buttons[0]?.pressed || gamepad.buttons[2]?.pressed;
+                    input.special = input.special || gamepad.buttons[1]?.pressed || gamepad.buttons[3]?.pressed;
+                    input.dodge = input.dodge || gamepad.buttons[4]?.pressed || gamepad.buttons[5]?.pressed;
+                }
+
+                return input;
+            }
+        }
+
+        const inputManager = new InputManager();
+
+        // ==================== DIBUJO DE SPRITES ====================
+        class SpriteRenderer {
+            static drawPixel(ctx, x, y, size, color) {
+                ctx.fillStyle = color;
+                ctx.fillRect(x, y, size, size);
+            }
+
+            static drawGlow(ctx, x, y, size, color, strength = 1) {
+                ctx.globalCompositeOperation = 'lighter';
+                for (let i = 0; i < 3; i++) {
+                    ctx.globalAlpha = (1 - i / 3) * 0.3 * strength;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x - i * 2, y - i * 2, size + i * 4, size + i * 4);
+                }
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+            }
+
+            static drawPlayerSprite(ctx, x, y, classType, direction = 'down', isAttacking = false) {
+                const scale = 2;
+                const size = 8 * scale;
+                const charClass = CHARACTER_CLASSES[classType];
+                const color = `rgb(${charClass.color.r}, ${charClass.color.g}, ${charClass.color.b})`;
+
+                // Draw glow
+                this.drawGlow(ctx, x + 4, y + 4, 16 * scale, charClass.glowColor, 0.6);
+
+                // Shadow
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                ctx.beginPath();
+                ctx.ellipse(x + 8 * scale, y + 14 * scale, 6 * scale, 2 * scale, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Cuerpo
+                ctx.fillStyle = color;
+                ctx.fillRect(x + 2 * scale, y + 4 * scale, 12 * scale, 10 * scale);
+
+                // Cabeza
+                ctx.fillStyle = '#ffdbac';
+                ctx.fillRect(x + 4 * scale, y, 8 * scale, 8 * scale);
+
+                // Ojos
+                ctx.fillStyle = '#000';
+                ctx.fillRect(x + 5 * scale, y + 2 * scale, 2 * scale, 2 * scale);
+                ctx.fillRect(x + 9 * scale, y + 2 * scale, 2 * scale, 2 * scale);
+
+                // Brazos
+                ctx.fillStyle = '#ffdbac';
+                ctx.fillRect(x + 1 * scale, y + 5 * scale, 2 * scale, 8 * scale);
+                ctx.fillRect(x + 13 * scale, y + 5 * scale, 2 * scale, 8 * scale);
+
+                // Class-specific features
+                if (classType === 'CABALLERO') {
+                    ctx.fillStyle = '#c0c0c0';
+                    ctx.fillRect(x + 2 * scale, y + 4 * scale, 1 * scale, 8 * scale); // Shield
+                }
+                if (classType === 'MAGO') {
+                    ctx.fillStyle = '#4169e1';
+                    ctx.fillRect(x + 13 * scale, y + 2 * scale, 2 * scale, 4 * scale); // Staff
+                    ctx.fillStyle = '#ffd700';
+                    ctx.beginPath();
+                    ctx.arc(x + 14 * scale, y + 1 * scale, 1.5 * scale, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            static drawEnemySprite(ctx, x, y, enemyType, frame = 0) {
+                const scale = 2;
+
+                // Draw shadow
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+                ctx.beginPath();
+                ctx.ellipse(x + 8 * scale, y + 14 * scale, 5 * scale, 1.5 * scale, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                const sprites = {
+                    bandido: () => {
+                        this.drawGlow(ctx, x + 2 * scale, y + 2 * scale, 12 * scale, '#ff6b6b', 0.4);
+                        ctx.fillStyle = '#8b4513';
+                        ctx.fillRect(x + 2 * scale, y + 4 * scale, 12 * scale, 10 * scale);
+                        ctx.fillStyle = '#333';
+                        ctx.fillRect(x + 4 * scale, y, 8 * scale, 8 * scale);
+                        ctx.fillStyle = '#fff';
+                        ctx.fillRect(x + 5 * scale, y + 2 * scale, 6 * scale, 2 * scale);
+                    },
+                    raiz: () => {
+                        this.drawGlow(ctx, x + 4 * scale, y + 4 * scale, 8 * scale, '#22dd22', 0.3);
+                        ctx.fillStyle = '#2d5016';
+                        ctx.beginPath();
+                        ctx.arc(x + 8 * scale, y + 8 * scale, 8 * scale, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#1a3d0a';
+                        for (let i = 0; i < 4; i++) {
+                            const angle = (i / 4) * Math.PI * 2 + frame * 0.1;
+                            const px = x + 8 * scale + Math.cos(angle) * 6 * scale;
+                            const py = y + 8 * scale + Math.sin(angle) * 6 * scale;
+                            ctx.fillRect(px - 2 * scale, py - 2 * scale, 4 * scale, 4 * scale);
+                        }
+                        // Purple corruption
+                        ctx.fillStyle = 'rgba(128, 0, 128, 0.3)';
+                        ctx.fillRect(x + 6 * scale, y + 6 * scale, 4 * scale, 4 * scale);
+                    },
+                    soldado: () => {
+                        this.drawGlow(ctx, x + 2 * scale, y + 2 * scale, 12 * scale, '#ffff66', 0.3);
+                        ctx.fillStyle = '#4a4a4a';
+                        ctx.fillRect(x + 2 * scale, y + 4 * scale, 12 * scale, 10 * scale);
+                        ctx.fillStyle = '#888';
+                        ctx.fillRect(x + 4 * scale, y + 1 * scale, 8 * scale, 3 * scale);
+                        ctx.fillStyle = '#ffff00';
+                        ctx.fillRect(x + 6 * scale, y + 2 * scale, 4 * scale, 2 * scale);
+                    },
+                    loco: () => {
+                        this.drawGlow(ctx, x + 4 * scale, y + 4 * scale, 8 * scale, '#ff00ff', 0.5);
+                        ctx.fillStyle = '#ff00ff';
+                        ctx.fillRect(x + 2 * scale, y + 4 * scale, 12 * scale, 10 * scale);
+                        ctx.fillStyle = '#00ffff';
+                        ctx.fillRect(x + 4 * scale, y, 8 * scale, 8 * scale);
+                        ctx.fillStyle = '#000';
+                        for (let i = 0; i < 3; i++) {
+                            ctx.fillRect(x + 4 * scale + i * 3 * scale, y + 2 * scale, 2 * scale, 2 * scale);
+                        }
+                    },
+                    demonio: () => {
+                        this.drawGlow(ctx, x + 4 * scale, y + 4 * scale, 8 * scale, '#ff4500', 0.6);
+                        ctx.fillStyle = '#ff4500';
+                        ctx.fillRect(x + 2 * scale, y + 4 * scale, 12 * scale, 10 * scale);
+                        ctx.fillStyle = '#ff6347';
+                        ctx.fillRect(x + 4 * scale, y, 8 * scale, 8 * scale);
+                        // Cuernos
+                        ctx.fillStyle = '#8b4513';
+                        ctx.fillRect(x + 3 * scale, y - 2 * scale, 2 * scale, 3 * scale);
+                        ctx.fillRect(x + 11 * scale, y - 2 * scale, 2 * scale, 3 * scale);
+                        // Eyes glow
+                        ctx.fillStyle = '#ffff00';
+                        ctx.fillRect(x + 5 * scale, y + 3 * scale, 2 * scale, 2 * scale);
+                        ctx.fillRect(x + 9 * scale, y + 3 * scale, 2 * scale, 2 * scale);
+                    },
+                    espectre: () => {
+                        this.drawGlow(ctx, x + 6 * scale, y + 4 * scale, 4 * scale, '#4169e1', 0.5);
+                        ctx.fillStyle = 'rgba(200, 200, 255, 0.8)';
+                        ctx.beginPath();
+                        ctx.arc(x + 8 * scale, y + 6 * scale, 7 * scale, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#0000ff';
+                        ctx.fillRect(x + 4 * scale, y + 2 * scale, 3 * scale, 3 * scale);
+                        ctx.fillRect(x + 9 * scale, y + 2 * scale, 3 * scale, 3 * scale);
+                    }
+                };
+
+                if (sprites[enemyType]) {
+                    sprites[enemyType]();
+                }
+            }
+
+            static drawBossSprite(ctx, x, y, bossType) {
+                const scale = 3;
+
+                // Shadow
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                ctx.beginPath();
+                ctx.ellipse(x + 12 * scale, y + 20 * scale, 10 * scale, 3 * scale, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                const bosses = {
+                    capitanBandido: () => {
+                        this.drawGlow(ctx, x + 6 * scale, y + 4 * scale, 20 * scale, '#ff4444', 0.8);
+                        ctx.fillStyle = '#8b0000';
+                        ctx.fillRect(x + 6 * scale, y + 8 * scale, 20 * scale, 16 * scale);
+                        ctx.fillStyle = '#ffdbac';
+                        ctx.fillRect(x + 8 * scale, y, 16 * scale, 16 * scale);
+                        ctx.fillStyle = '#000';
+                        ctx.fillRect(x + 10 * scale, y + 4 * scale, 4 * scale, 4 * scale);
+                        ctx.fillRect(x + 18 * scale, y + 4 * scale, 4 * scale, 4 * scale);
+                        // Sombrero
+                        ctx.fillStyle = '#333';
+                        ctx.fillRect(x + 6 * scale, y - 2 * scale, 20 * scale, 4 * scale);
+                        // Red cape
+                        ctx.fillStyle = '#cc0000';
+                        ctx.fillRect(x + 4 * scale, y + 10 * scale, 3 * scale, 12 * scale);
+                        ctx.fillRect(x + 20 * scale, y + 10 * scale, 3 * scale, 12 * scale);
+                    },
+                    entAnciano: () => {
+                        this.drawGlow(ctx, x + 8 * scale, y + 6 * scale, 16 * scale, '#228b22', 0.7);
+                        ctx.fillStyle = '#1a5f1a';
+                        ctx.fillRect(x + 8 * scale, y + 8 * scale, 16 * scale, 16 * scale);
+                        ctx.fillStyle = '#2d5016';
+                        ctx.fillRect(x + 10 * scale, y + 2 * scale, 12 * scale, 8 * scale);
+                        ctx.fillStyle = '#228b22';
+                        for (let i = 0; i < 6; i++) {
+                            ctx.fillRect(x + 10 * scale + i * 2 * scale, y + 2 * scale - 2 * scale, 2 * scale, 3 * scale);
+                        }
+                    },
+                    comandanteCaido: () => {
+                        this.drawGlow(ctx, x + 8 * scale, y + 4 * scale, 16 * scale, '#ccaa00', 0.8);
+                        ctx.fillStyle = '#4a4a4a';
+                        ctx.fillRect(x + 8 * scale, y + 8 * scale, 16 * scale, 16 * scale);
+                        ctx.fillStyle = '#c0c0c0';
+                        ctx.fillRect(x + 10 * scale, y, 12 * scale, 10 * scale);
+                        ctx.fillStyle = '#888';
+                        ctx.fillRect(x + 10 * scale, y + 2 * scale, 4 * scale, 3 * scale);
+                        ctx.fillRect(x + 18 * scale, y + 2 * scale, 4 * scale, 3 * scale);
+                        // Armor accent
+                        ctx.fillStyle = '#ffd700';
+                        ctx.fillRect(x + 12 * scale, y + 4 * scale, 8 * scale, 2 * scale);
+                    },
+                    caballerosNi: () => {
+                        this.drawGlow(ctx, x + 8 * scale, y + 4 * scale, 16 * scale, '#ff00ff', 0.9);
+                        ctx.fillStyle = '#ff00ff';
+                        ctx.fillRect(x + 8 * scale, y + 8 * scale, 16 * scale, 16 * scale);
+                        ctx.fillStyle = '#00ffff';
+                        ctx.fillRect(x + 10 * scale, y, 12 * scale, 10 * scale);
+                        ctx.fillStyle = '#ffff00';
+                        for (let i = 0; i < 3; i++) {
+                            ctx.fillRect(x + 10 * scale + i * 3 * scale, y + 2 * scale, 2 * scale, 2 * scale);
+                        }
+                        // Psychedelic patterns
+                        ctx.fillStyle = 'rgba(255, 0, 255, 0.5)';
+                        ctx.fillRect(x + 10 * scale, y + 10 * scale, 4 * scale, 4 * scale);
+                        ctx.fillRect(x + 18 * scale, y + 10 * scale, 4 * scale, 4 * scale);
+                    },
+                    senorCrisol: () => {
+                        this.drawGlow(ctx, x + 8 * scale, y + 4 * scale, 16 * scale, '#ff6600', 1);
+                        ctx.fillStyle = '#cc3300';
+                        ctx.fillRect(x + 8 * scale, y + 8 * scale, 16 * scale, 16 * scale);
+                        ctx.fillStyle = '#ff6600';
+                        ctx.fillRect(x + 10 * scale, y + 2 * scale, 12 * scale, 8 * scale);
+                        ctx.fillStyle = '#ffaa00';
+                        ctx.fillRect(x + 12 * scale, y + 4 * scale, 8 * scale, 4 * scale);
+                        // Lava glow eyes
+                        ctx.fillStyle = '#ffff00';
+                        ctx.fillRect(x + 12 * scale, y + 4 * scale, 2 * scale, 2 * scale);
+                        ctx.fillRect(x + 18 * scale, y + 4 * scale, 2 * scale, 2 * scale);
+                    },
+                    guardianGrial: () => {
+                        this.drawGlow(ctx, x + 8 * scale, y + 4 * scale, 16 * scale, '#ffd700', 1.2);
+                        ctx.fillStyle = '#4a4a6a';
+                        ctx.fillRect(x + 8 * scale, y + 8 * scale, 16 * scale, 16 * scale);
+                        ctx.fillStyle = '#ffd700';
+                        ctx.fillRect(x + 10 * scale, y + 2 * scale, 12 * scale, 8 * scale);
+                        ctx.fillRect(x + 12 * scale, y + 10 * scale, 8 * scale, 3 * scale);
+                        // Holy light
+                        ctx.fillStyle = '#ffff99';
+                        ctx.beginPath();
+                        ctx.arc(x + 16 * scale, y + 12 * scale, 4 * scale, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                };
+
+                if (bosses[bossType]) {
+                    bosses[bossType]();
+                }
+            }
+        }
+
+        // ==================== CLASES DE ENTIDADES ====================
+        class Entity {
+            constructor(x, y, type) {
+                this.position = new Vector2(x, y);
+                this.velocity = new Vector2(0, 0);
+                this.width = 16;
+                this.height = 16;
+                this.type = type;
+                this.active = true;
+            }
+
+            update(dt) {
+                this.position = this.position.add(this.velocity.multiply(dt));
+            }
+
+            draw(ctx) {}
+
+            intersects(other) {
+                return (
+                    this.position.x < other.position.x + other.width &&
+                    this.position.x + this.width > other.position.x &&
+                    this.position.y < other.position.y + other.height &&
+                    this.position.y + this.height > other.position.y
+                );
+            }
+        }
+
+        class Player extends Entity {
+            constructor(x, y, classType, index = 0) {
+                super(x, y, 'player');
+                this.classType = classType;
+                this.index = index;
+                this.classStats = CHARACTER_CLASSES[classType];
+                this.hp = this.classStats.maxHp;
+                this.maxHp = this.classStats.maxHp;
+                this.energy = 100;
+                this.maxEnergy = 100;
+                this.facing = new Vector2(0, 1); // dirección a la que mira
+                this.attackCooldown = 0;
+                this.specialCooldown = 0;
+                this.isDodging = false;
+                this.dodgeTimer = 0;
+                this.invulnerableTimer = 0;
+                this.comboCounter = 0;
+                this.lastHitTime = 0;
+                // Animaciones
+                this.attackAnimTimer = 0; // duración visual del ataque
+                this.specialAnimTimer = 0;
+                this.attackRotation = 0; // rotación para swing de espada
+                this.pendingProjectiles = []; // proyectiles pendientes de enviar
+                // Progresión
+                this.coins = 0;
+                this.level = 1;
+            }
+
+            handleInput(inputState) {
+                const speed = this.classStats.speed;
+                this.velocity = new Vector2(0, 0);
+
+                if (inputState.up) this.velocity.y -= speed;
+                if (inputState.down) this.velocity.y += speed;
+                if (inputState.left) this.velocity.x -= speed;
+                if (inputState.right) this.velocity.x += speed;
+
+                // Actualizar dirección de cara
+                if (this.velocity.length() > 0) {
+                    this.facing = this.velocity.normalize();
+                }
+
+                if (inputState.attack && this.attackCooldown <= 0) {
+                    this.performAttack();
+                }
+
+                if (inputState.special && this.specialCooldown <= 0 && this.energy >= this.classStats.specialCost) {
+                    this.performSpecial();
+                }
+
+                if (inputState.dodge && !this.isDodging) {
+                    this.dodge();
+                }
+            }
+
+            performAttack() {
+                this.attackCooldown = 0.35;
+                this.attackAnimTimer = 0.25;
+                this.attackRotation = 0;
+                audioSystem.playSfx('attack');
+
+                const cx = this.position.x + 16;
+                const cy = this.position.y + 16;
+
+                if (this.classType === 'CABALLERO') {
+                    // Espada: arco amplio melee
+                    const baseAngle = Math.atan2(this.facing.y, this.facing.x);
+                    for (let a = -0.6; a <= 0.6; a += 0.3) {
+                        const angle = baseAngle + a;
+                        const vel = new Vector2(Math.cos(angle), Math.sin(angle)).multiply(350);
+                        const p = new Projectile(cx + Math.cos(angle) * 10, cy + Math.sin(angle) * 10, vel, this.classStats.attack, 'player');
+                        p.lifetime = 0.15; p.projColor = '#ffaa00'; p.projSize = 6;
+                        this.pendingProjectiles.push(p);
+                    }
+                    particleSystem.burst(cx + this.facing.x * 20, cy + this.facing.y * 20, 6, 120, 0.2, ['#ffaa00', '#ff6600']);
+
+                } else if (this.classType === 'MAGO') {
+                    // Bola mágica: proyectil a distancia
+                    const vel = new Vector2(this.facing.x, this.facing.y).multiply(500);
+                    const p = new Projectile(cx, cy, vel, this.classStats.attack, 'player');
+                    p.lifetime = 1.5; p.projColor = '#66ccff'; p.projSize = 7;
+                    this.pendingProjectiles.push(p);
+                    particleSystem.burst(cx, cy, 4, 80, 0.15, ['#66ccff', '#aaeeff']);
+
+                } else if (this.classType === 'PICARO') {
+                    // Dagas rápidas: 3 proyectiles en ráfaga
+                    this.attackCooldown = 0.2; // más rápido
+                    const baseAngle = Math.atan2(this.facing.y, this.facing.x);
+                    for (let i = -1; i <= 1; i++) {
+                        const angle = baseAngle + i * 0.15;
+                        const vel = new Vector2(Math.cos(angle), Math.sin(angle)).multiply(550);
+                        const p = new Projectile(cx, cy, vel, this.classStats.attack * 0.7, 'player');
+                        p.lifetime = 0.4; p.projColor = '#88ff88'; p.projSize = 4;
+                        this.pendingProjectiles.push(p);
+                    }
+                    particleSystem.burst(cx, cy, 3, 100, 0.1, ['#88ff88', '#44cc44']);
+
+                } else if (this.classType === 'CLERIGO') {
+                    // Golpe sagrado: proyectil medio
+                    const vel = new Vector2(this.facing.x, this.facing.y).multiply(400);
+                    const p = new Projectile(cx, cy, vel, this.classStats.attack, 'player');
+                    p.lifetime = 0.8; p.projColor = '#ffffaa'; p.projSize = 6;
+                    this.pendingProjectiles.push(p);
+                    particleSystem.burst(cx, cy, 4, 80, 0.2, ['#ffffaa', '#ffffff']);
+                }
+            }
+
+            performSpecial() {
+                this.specialCooldown = 1.5;
+                this.energy -= this.classStats.specialCost;
+                this.specialAnimTimer = 0.5;
+                audioSystem.playSfx('special');
+
+                const cx = this.position.x + 16;
+                const cy = this.position.y + 16;
+
+                if (this.classType === 'CABALLERO') {
+                    // Torbellino: proyectiles en todas direcciones
+                    for (let i = 0; i < 12; i++) {
+                        const angle = (i / 12) * Math.PI * 2;
+                        const vel = new Vector2(Math.cos(angle), Math.sin(angle)).multiply(300);
+                        const p = new Projectile(cx, cy, vel, this.classStats.specialDamage, 'player');
+                        p.lifetime = 0.3; p.projColor = '#ff6600'; p.projSize = 7;
+                        this.pendingProjectiles.push(p);
+                    }
+                    particleSystem.burst(cx, cy, 20, 180, 0.5, ['#ff6600', '#ffaa00', '#ffcc00']);
+
+                } else if (this.classType === 'MAGO') {
+                    // Bola de fuego: proyectil grande explosivo
+                    const vel = new Vector2(this.facing.x, this.facing.y).multiply(350);
+                    const p = new Projectile(cx, cy, vel, this.classStats.specialDamage, 'player');
+                    p.lifetime = 2; p.projColor = '#ff4400'; p.projSize = 12;
+                    this.pendingProjectiles.push(p);
+                    // Proyectiles laterales
+                    for (let a = -0.4; a <= 0.4; a += 0.2) {
+                        const baseAngle = Math.atan2(this.facing.y, this.facing.x) + a;
+                        const svel = new Vector2(Math.cos(baseAngle), Math.sin(baseAngle)).multiply(300);
+                        const sp = new Projectile(cx, cy, svel, this.classStats.specialDamage * 0.5, 'player');
+                        sp.lifetime = 1; sp.projColor = '#ff8844'; sp.projSize = 6;
+                        this.pendingProjectiles.push(sp);
+                    }
+                    particleSystem.burst(cx, cy, 15, 150, 0.5, ['#ff4400', '#ff8800', '#ffcc00']);
+
+                } else if (this.classType === 'PICARO') {
+                    // Lluvia de dagas: muchos proyectiles rápidos en abanico
+                    const baseAngle = Math.atan2(this.facing.y, this.facing.x);
+                    for (let i = 0; i < 8; i++) {
+                        const angle = baseAngle + (i - 3.5) * 0.2;
+                        const vel = new Vector2(Math.cos(angle), Math.sin(angle)).multiply(600);
+                        const p = new Projectile(cx, cy, vel, this.classStats.specialDamage, 'player');
+                        p.lifetime = 0.5; p.projColor = '#00ff88'; p.projSize = 5;
+                        this.pendingProjectiles.push(p);
+                    }
+                    particleSystem.burst(cx, cy, 12, 200, 0.3, ['#00ff88', '#88ffcc']);
+
+                } else if (this.classType === 'CLERIGO') {
+                    // Curación en área: sana a todos los jugadores cercanos + ataque divino
+                    this.healAllNearby = true; // flag para el gameplay loop
+                    this.healAmount = 30; // Heal 30 HP
+                    for (let i = 0; i < 8; i++) {
+                        const angle = (i / 8) * Math.PI * 2;
+                        const vel = new Vector2(Math.cos(angle), Math.sin(angle)).multiply(200);
+                        const p = new Projectile(cx, cy, vel, 15, 'player');
+                        p.lifetime = 0.5; p.projColor = '#ffffff'; p.projSize = 5;
+                        this.pendingProjectiles.push(p);
+                    }
+                    particleSystem.burst(cx, cy, 25, 200, 0.6, ['#ffffff', '#ffffaa', '#ffff66']);
+                }
+            }
+
+            dodge() {
+                this.isDodging = true;
+                this.dodgeTimer = 0.3;
+                this.invulnerableTimer = 0.3;
+                // Dash en la dirección de cara
+                this.position.x += this.facing.x * 60;
+                this.position.y += this.facing.y * 60;
+                audioSystem.playSfx('dodge');
+                particleSystem.burst(this.position.x, this.position.y, 8, 150, 0.3, ['#ccccff', '#6666ff']);
+            }
+
+            takeDamage(amount) {
+                if (this.isDodging || this.invulnerableTimer > 0) return;
+                const def = this.classStats.defense;
+                const realDamage = Math.max(1, amount - def * 0.3);
+                this.hp = Math.max(0, this.hp - realDamage);
+                this.invulnerableTimer = 0.5;
+                audioSystem.playSfx('hit');
+                if (this.hp <= 0) audioSystem.playSfx('death');
+                particleSystem.burst(this.position.x + 16, this.position.y + 16, 6, 100, 0.4, ['#ff6666', '#ff0000']);
+            }
+
+            heal(amount) {
+                this.hp = Math.min(this.maxHp, this.hp + amount);
+                particleSystem.burst(this.position.x + 16, this.position.y + 16, 5, 80, 0.3, ['#00ff66', '#aaffaa']);
+            }
+
+            addCoins(amount) {
+                const adjusted = Math.floor(amount * globalDifficulty.coinMultiplier);
+                this.coins += adjusted;
+            }
+
+            getLevelCost(targetLevel) {
+                const costs = [0, 10, 20, 35, 55, 80, 110, 150, 200, 300];
+                return targetLevel < costs.length ? costs[targetLevel] : 999;
+            }
+
+            levelUp() {
+                if (this.level >= 10) return false;
+                const cost = this.getLevelCost(this.level + 1);
+                if (this.coins < cost) return false;
+
+                this.coins -= cost;
+                this.level++;
+
+                // Aplicar bonificaciones
+                const hpMultiplier = Math.pow(1.05, 1); // +5%
+                const atkMultiplier = 1.05;
+                const defMultiplier = 1.03;
+                const spdMultiplier = 1.02;
+
+                this.maxHp = Math.floor(this.maxHp * hpMultiplier);
+                this.hp = this.maxHp;
+                this.classStats.attack = Math.floor(this.classStats.attack * atkMultiplier);
+                this.classStats.defense = Math.floor(this.classStats.defense * defMultiplier);
+                this.classStats.speed = Math.floor(this.classStats.speed * spdMultiplier);
+
+                audioSystem.playSfx('levelup');
+                return true;
+            }
+
+            recordHit() {
+                this.lastHitTime = 0.8;
+                this.comboCounter++;
+            }
+
+            resetCombo() {
+                this.comboCounter = 0;
+            }
+
+            update(dt) {
+                super.update(dt);
+
+                this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+                this.specialCooldown = Math.max(0, this.specialCooldown - dt);
+                this.attackAnimTimer = Math.max(0, this.attackAnimTimer - dt);
+                this.specialAnimTimer = Math.max(0, this.specialAnimTimer - dt);
+                this.lastHitTime = Math.max(0, this.lastHitTime - dt);
+
+                if (this.lastHitTime <= 0) this.resetCombo();
+
+                if (this.isDodging) {
+                    this.dodgeTimer -= dt;
+                    if (this.dodgeTimer <= 0) this.isDodging = false;
+                }
+
+                this.invulnerableTimer = Math.max(0, this.invulnerableTimer - dt);
+                this.energy = Math.min(this.maxEnergy, this.energy + dt * 25);
+
+                // Rotación de animación de ataque
+                if (this.attackAnimTimer > 0) {
+                    this.attackRotation += dt * 20;
+                }
+
+                // Limitar movimiento al canvas
+                this.position.x = Math.max(0, Math.min(CONFIG.CANVAS_WIDTH - 32, this.position.x));
+                this.position.y = Math.max(0, Math.min(CONFIG.CANVAS_HEIGHT - 32, this.position.y));
+            }
+
+            draw(ctx) {
+                const cx = this.position.x + 16;
+                const cy = this.position.y + 16;
+
+                // Sombra
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.beginPath();
+                ctx.ellipse(cx, this.position.y + 34, 12, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Invulnerabilidad parpadeo
+                if (this.invulnerableTimer > 0 && Math.sin(this.invulnerableTimer * 20) > 0) {
+                    ctx.globalAlpha = 0.4;
+                }
+
+                // Dodge flash
+                if (this.isDodging) {
+                    ctx.globalAlpha = 0.3;
+                }
+
+                // Dibujar sprite del personaje
+                SpriteRenderer.drawPlayerSprite(ctx, this.position.x, this.position.y, this.classType, 'down', this.attackAnimTimer > 0);
+
+                ctx.globalAlpha = 1;
+
+                // === ANIMACIONES DE ATAQUE ===
+                if (this.attackAnimTimer > 0) {
+                    const angle = Math.atan2(this.facing.y, this.facing.x);
+                    ctx.save();
+                    ctx.translate(cx, cy);
+
+                    if (this.classType === 'CABALLERO') {
+                        // Arco de espada giratorio
+                        ctx.rotate(angle + this.attackRotation);
+                        ctx.strokeStyle = '#ffaa00';
+                        ctx.lineWidth = 4;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, 28, -0.8, 0.8);
+                        ctx.stroke();
+                        ctx.strokeStyle = '#ffcc44';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(8, 0);
+                        ctx.lineTo(30, 0);
+                        ctx.stroke();
+
+                    } else if (this.classType === 'MAGO') {
+                        // Orbe mágico brillando en la punta del staff
+                        const orbX = this.facing.x * 22;
+                        const orbY = this.facing.y * 22;
+                        ctx.globalCompositeOperation = 'lighter';
+                        ctx.fillStyle = '#66ccff';
+                        ctx.beginPath();
+                        ctx.arc(orbX, orbY, 8 + Math.sin(this.attackRotation * 3) * 3, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.globalCompositeOperation = 'source-over';
+
+                    } else if (this.classType === 'PICARO') {
+                        // Dagas cruzadas rápidas
+                        const t = this.attackRotation;
+                        ctx.strokeStyle = '#88ff88';
+                        ctx.lineWidth = 3;
+                        ctx.rotate(angle);
+                        ctx.beginPath();
+                        ctx.moveTo(5, -8); ctx.lineTo(25, 0); ctx.lineTo(5, 8);
+                        ctx.stroke();
+                        ctx.rotate(t * 2);
+                        ctx.beginPath();
+                        ctx.moveTo(5, -5); ctx.lineTo(20, 0); ctx.lineTo(5, 5);
+                        ctx.stroke();
+
+                    } else if (this.classType === 'CLERIGO') {
+                        // Brillo sagrado
+                        ctx.globalCompositeOperation = 'lighter';
+                        ctx.fillStyle = 'rgba(255, 255, 200, 0.4)';
+                        ctx.beginPath();
+                        ctx.arc(this.facing.x * 18, this.facing.y * 18, 14, 0, Math.PI * 2);
+                        ctx.fill();
+                        // Cruz
+                        ctx.strokeStyle = '#ffffaa';
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.moveTo(this.facing.x * 18 - 6, this.facing.y * 18);
+                        ctx.lineTo(this.facing.x * 18 + 6, this.facing.y * 18);
+                        ctx.moveTo(this.facing.x * 18, this.facing.y * 18 - 6);
+                        ctx.lineTo(this.facing.x * 18, this.facing.y * 18 + 6);
+                        ctx.stroke();
+                        ctx.globalCompositeOperation = 'source-over';
+                    }
+
+                    ctx.restore();
+                }
+
+                // Animación especial (anillo de poder)
+                if (this.specialAnimTimer > 0) {
+                    const radius = 30 + (0.5 - this.specialAnimTimer) * 60;
+                    const alpha = this.specialAnimTimer;
+                    ctx.globalAlpha = alpha;
+                    ctx.strokeStyle = this.classStats.glowColor;
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.globalAlpha = 1;
+                }
+            }
+
+            getAttackProjectiles() {
+                const projs = [...this.pendingProjectiles];
+                this.pendingProjectiles = [];
+                return projs;
+            }
+        }
+
+        class Enemy extends Entity {
+            constructor(x, y, type) {
+                super(x, y, 'enemy');
+                this.enemyType = type;
+                this.hp = 20;
+                this.maxHp = 20;
+                this.speed = 100;
+                this.damage = 5;
+                this.attackRange = 200;
+                this.attackCooldown = 0;
+                this.moveTimer = 0;
+                this.moveDirection = new Vector2(Math.random() - 0.5, Math.random() - 0.5).normalize();
+            }
+
+            update(dt, players) {
+                this.moveTimer -= dt;
+                if (this.moveTimer <= 0) {
+                    this.moveDirection = new Vector2(Math.random() - 0.5, Math.random() - 0.5).normalize();
+                    this.moveTimer = 2;
+                }
+
+                // Buscar jugador más cercano
+                let closestPlayer = null;
+                let closestDistance = this.attackRange;
+
+                for (let player of players) {
+                    const dist = this.position.distance(player.position);
+                    if (dist < closestDistance) {
+                        closestDistance = dist;
+                        closestPlayer = player;
+                    }
+                }
+
+                if (closestPlayer) {
+                    const dir = closestPlayer.position.subtract(this.position).normalize();
+                    this.velocity = dir.multiply(this.speed);
+                } else {
+                    this.velocity = this.moveDirection.multiply(this.speed);
+                }
+
+                this.position = this.position.add(this.velocity.multiply(dt));
+
+                // Limitar al canvas
+                this.position.x = Math.max(0, Math.min(CONFIG.CANVAS_WIDTH - this.width, this.position.x));
+                this.position.y = Math.max(0, Math.min(CONFIG.CANVAS_HEIGHT - this.height, this.position.y));
+
+                this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+            }
+
+            draw(ctx) {
+                SpriteRenderer.drawEnemySprite(ctx, this.position.x, this.position.y, this.enemyType);
+
+                // Fancy HP bar with gradient
+                const barWidth = 20;
+                const barHeight = 4;
+                const x = this.position.x + (this.width - barWidth) / 2;
+                const y = this.position.y - 8;
+
+                // Background
+                ctx.fillStyle = '#000';
+                ctx.fillRect(x - 1, y - 1, barWidth + 2, barHeight + 2);
+
+                // HP gradient (green to red)
+                const healthPercent = this.hp / this.maxHp;
+                const hueColor = healthPercent > 0.5 ? '#00ff00' : healthPercent > 0.25 ? '#ffff00' : '#ff0000';
+                ctx.fillStyle = hueColor;
+                ctx.fillRect(x, y, (healthPercent) * barWidth, barHeight);
+
+                // Border
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x - 1, y - 1, barWidth + 2, barHeight + 2);
+            }
+
+            takeDamage(amount) {
+                this.hp = Math.max(0, this.hp - amount);
+                audioSystem.playSfx('enemyHit');
+                particleSystem.burst(this.position.x + 16, this.position.y + 16, 4, 80, 0.3, ['#ffffff', '#ffaaaa']);
+            }
+
+            isDefeated() {
+                return this.hp <= 0;
+            }
+        }
+
+        class Boss extends Entity {
+            constructor(x, y, type, zone) {
+                super(x, y, 'boss');
+                this.bossType = type;
+                this.zone = zone;
+                this.width = 48;
+                this.height = 48;
+                this.glowPulse = 0;
+
+                const bossStats = {
+                    capitanBandido: { hp: 80, damage: 12, speed: 100 },
+                    entAnciano: { hp: 100, damage: 15, speed: 70 },
+                    comandanteCaido: { hp: 120, damage: 16, speed: 90 },
+                    caballerosNi: { hp: 90, damage: 10, speed: 130 },
+                    senorCrisol: { hp: 140, damage: 18, speed: 90 },
+                    guardianGrial: { hp: 180, damage: 20, speed: 100 }
+                };
+
+                const stats = bossStats[type];
+                this.hp = stats.hp;
+                this.maxHp = stats.hp;
+                this.damage = stats.damage;
+                this.speed = stats.speed;
+                this.attackCooldown = 0;
+                this.patternTimer = 0;
+                this.patternIndex = 0;
+            }
+
+            update(dt, players) {
+                this.patternTimer += dt;
+                this.glowPulse += dt * 3;
+                this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+
+                // Patrón de ataque específico del boss
+                if (this.patternTimer > 2) {
+                    this.patternTimer = 0;
+                    this.patternIndex = (this.patternIndex + 1) % 3;
+                }
+
+                // Seguimiento básico
+                if (players.length > 0) {
+                    const targetPlayer = players[0];
+                    const dist = this.position.distance(targetPlayer.position);
+                    if (dist > 50) {
+                        const dir = targetPlayer.position.subtract(this.position).normalize();
+                        this.velocity = dir.multiply(this.speed);
+                    } else {
+                        this.velocity = new Vector2(0, 0);
+                    }
+                }
+
+                this.position = this.position.add(this.velocity.multiply(dt));
+
+                // Limitar al canvas
+                this.position.x = Math.max(0, Math.min(CONFIG.CANVAS_WIDTH - this.width, this.position.x));
+                this.position.y = Math.max(0, Math.min(CONFIG.CANVAS_HEIGHT - this.height, this.position.y));
+            }
+
+            draw(ctx) {
+                // Pulsating glow behind boss
+                const glowStrength = 0.5 + Math.sin(this.glowPulse) * 0.3;
+                ctx.globalCompositeOperation = 'lighter';
+                ctx.globalAlpha = glowStrength * 0.4;
+                ctx.fillStyle = '#ff4444';
+                ctx.beginPath();
+                ctx.arc(this.position.x + 24, this.position.y + 24, 60, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+
+                SpriteRenderer.drawBossSprite(ctx, this.position.x, this.position.y, this.bossType);
+
+                // Enhanced boss HP bar with name
+                const barWidth = 240;
+                const barHeight = 12;
+                const x = CONFIG.CANVAS_WIDTH / 2 - barWidth / 2;
+                const y = 15;
+
+                // Background with border
+                ctx.fillStyle = '#000';
+                ctx.fillRect(x - 2, y - 2, barWidth + 4, barHeight + 4);
+
+                // HP gradient (red to yellow to green)
+                const healthPercent = Math.max(0, this.hp / this.maxHp);
+                const hueColor = healthPercent > 0.5 ? '#ff0000' : healthPercent > 0.25 ? '#ffff00' : '#ff6600';
+                ctx.fillStyle = hueColor;
+                ctx.fillRect(x, y, (healthPercent) * barWidth, barHeight);
+
+                // Golden border
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(x, y, barWidth, barHeight);
+
+                // Skull icons
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('☠', x - 20, y + 8);
+                ctx.fillText('☠', x + barWidth + 20, y + 8);
+
+                // Boss name
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('BOSS', CONFIG.CANVAS_WIDTH / 2, y - 10);
+            }
+
+            takeDamage(amount) {
+                this.hp = Math.max(0, this.hp - amount);
+                audioSystem.playSfx('enemyHit');
+                if (this.hp <= this.maxHp * 0.1) {
+                    particleSystem.burst(this.position.x + 24, this.position.y + 24, 12, 120, 0.5, ['#ff4444', '#ff6666']);
+                }
+            }
+
+            isDefeated() {
+                return this.hp <= 0;
+            }
+
+            getAttackPattern(dt) {
+                const projectiles = [];
+                if (this.attackCooldown <= 0) {
+                    this.attackCooldown = 1.5;
+                    const angles = this.patternIndex === 0 ? 8 : this.patternIndex === 1 ? 12 : 16;
+                    for (let i = 0; i < angles; i++) {
+                        const angle = (i / angles) * Math.PI * 2;
+                        const vel = new Vector2(Math.cos(angle), Math.sin(angle))
+                            .normalize()
+                            .multiply(250);
+                        projectiles.push(new Projectile(
+                            this.position.x + 24,
+                            this.position.y + 24,
+                            vel,
+                            this.damage,
+                            'enemy'
+                        ));
+                    }
+                }
+                return projectiles;
+            }
+        }
+
+        class Projectile extends Entity {
+            constructor(x, y, velocity, damage, owner) {
+                super(x, y, 'projectile');
+                this.velocity = velocity;
+                this.damage = damage;
+                this.owner = owner;
+                this.lifetime = 3;
+                this.projColor = owner === 'player' ? '#ffff00' : '#ff3333';
+                this.projSize = 5;
+                this.width = 10;
+                this.height = 10;
+            }
+
+            update(dt) {
+                super.update(dt);
+                this.lifetime -= dt;
+
+                if (this.lifetime <= 0) {
+                    this.active = false;
+                }
+
+                // Out of bounds
+                if (this.position.x < -20 || this.position.x > CONFIG.CANVAS_WIDTH + 20 ||
+                    this.position.y < -20 || this.position.y > CONFIG.CANVAS_HEIGHT + 20) {
+                    this.active = false;
+                }
+            }
+
+            draw(ctx) {
+                const s = this.projSize;
+                // Glow trail
+                ctx.globalCompositeOperation = 'lighter';
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = this.projColor;
+                ctx.beginPath();
+                ctx.arc(this.position.x, this.position.y, s + 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+
+                // Core
+                ctx.fillStyle = this.projColor;
+                ctx.beginPath();
+                ctx.arc(this.position.x, this.position.y, s, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Bright center
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(this.position.x, this.position.y, s * 0.4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // ==================== SISTEMA DE MAPAS ====================
+        class GameMap {
+            constructor(width, height, theme) {
+                this.width = width;
+                this.height = height;
+                this.theme = theme;
+                this.tileSize = CONFIG.TILE_SIZE;
+                this.tiles = [];
+                this.time = 0;
+                this.generateMap();
+            }
+
+            generateMap() {
+                for (let y = 0; y < this.height; y++) {
+                    this.tiles[y] = [];
+                    for (let x = 0; x < this.width; x++) {
+                        this.tiles[y][x] = Math.floor(Math.random() * 2);
+                    }
+                }
+            }
+
+            getTileColor(theme, tileValue, x, y, time) {
+                switch (theme) {
+                    case 'village':
+                        if (tileValue === 0) return '#3d8e35';
+                        return '#228b22';
+                    case 'forest':
+                        if (tileValue === 0) return '#1a4d1a';
+                        return '#0d2d0d';
+                    case 'fortress':
+                        if (tileValue === 0) return '#666666';
+                        return '#444444';
+                    case 'chaos':
+                        const colors = ['#ff00ff', '#00ffff', '#ffff00', '#ff00ff', '#00ffff'];
+                        const cycle = Math.floor((time * 2 + x + y) % colors.length);
+                        return colors[cycle];
+                    case 'volcano':
+                        if (tileValue === 0) return '#8b4513';
+                        return '#cc3300';
+                    case 'temple':
+                        if (tileValue === 0) return '#e6d5b8';
+                        return '#d4af37';
+                    default:
+                        return '#999';
+                }
+            }
+
+            update(dt) {
+                this.time += dt;
+            }
+
+            draw(ctx) {
+                // Theme-based ambient lighting tint
+                const tints = {
+                    'village': { r: 0, g: 20, b: 0 },
+                    'forest': { r: 0, g: 10, b: 5 },
+                    'fortress': { r: 10, g: 10, b: 10 },
+                    'chaos': { r: 20, g: 0, b: 20 },
+                    'volcano': { r: 30, g: 10, b: 0 },
+                    'temple': { r: 15, g: 12, b: 0 }
+                };
+
+                const tint = tints[this.theme] || { r: 0, g: 0, b: 0 };
+                ctx.fillStyle = `rgb(${tint.r}, ${tint.g}, ${tint.b})`;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Draw tiles
+                for (let y = 0; y < this.height; y++) {
+                    for (let x = 0; x < this.width; x++) {
+                        const tileValue = this.tiles[y][x];
+                        const color = this.getTileColor(this.theme, tileValue, x, y, this.time);
+                        ctx.fillStyle = color;
+                        ctx.fillRect(x * this.tileSize, y * this.tileSize, this.tileSize, this.tileSize);
+
+                        // Tile details and animations
+                        if (this.theme === 'village' && tileValue === 0) {
+                            // Grass details
+                            ctx.fillStyle = '#2d6b2d';
+                            ctx.fillRect(x * this.tileSize + 8, y * this.tileSize + 8, 4, 4);
+                            ctx.fillRect(x * this.tileSize + 20, y * this.tileSize + 20, 4, 4);
+                        } else if (this.theme === 'forest' && tileValue === 1) {
+                            // Mossy details
+                            ctx.fillStyle = 'rgba(100, 200, 100, 0.3)';
+                            ctx.fillRect(x * this.tileSize + 4, y * this.tileSize + 4, 8, 8);
+                        } else if (this.theme === 'fortress') {
+                            // Stone brick pattern
+                            ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+                            ctx.lineWidth = 1;
+                            ctx.strokeRect(x * this.tileSize, y * this.tileSize, this.tileSize, this.tileSize);
+                        } else if (this.theme === 'volcano' && tileValue === 1) {
+                            // Lava glow
+                            ctx.fillStyle = 'rgba(255, 100, 0, 0.4)';
+                            ctx.fillRect(x * this.tileSize + 6, y * this.tileSize + 6, 20, 20);
+                        } else if (this.theme === 'temple') {
+                            // Crystal shine
+                            ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                            ctx.fillRect(x * this.tileSize + 2, y * this.tileSize + 2, 4, 4);
+                        }
+                    }
+                }
+
+                // Draw ambient zone particles
+                if (this.theme === 'village') {
+                    const leafY = (this.time * 30) % CONFIG.CANVAS_HEIGHT;
+                    for (let i = 0; i < 5; i++) {
+                        const x = (i * 256 + this.time * 20) % CONFIG.CANVAS_WIDTH;
+                        ctx.fillStyle = 'rgba(100, 200, 50, 0.3)';
+                        ctx.beginPath();
+                        ctx.arc(x, leafY + i * 144, 2, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                } else if (this.theme === 'forest') {
+                    // Fireflies
+                    for (let i = 0; i < 8; i++) {
+                        const x = CONFIG.CANVAS_WIDTH * Math.sin(this.time + i) * 0.5 + CONFIG.CANVAS_WIDTH / 2 + i * 100;
+                        const y = CONFIG.CANVAS_HEIGHT * Math.sin(this.time * 0.7 + i) * 0.3 + CONFIG.CANVAS_HEIGHT / 2 + i * 40;
+                        ctx.fillStyle = i % 2 === 0 ? 'rgba(0, 255, 100, 0.6)' : 'rgba(200, 100, 200, 0.4)';
+                        ctx.beginPath();
+                        ctx.arc(x, y, 2, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                } else if (this.theme === 'volcano') {
+                    // Heat waves
+                    for (let i = 0; i < 10; i++) {
+                        const y = (i * 72 + this.time * 50) % CONFIG.CANVAS_HEIGHT;
+                        ctx.globalAlpha = 0.1;
+                        ctx.strokeStyle = '#ff8800';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(0, y);
+                        for (let x = 0; x < CONFIG.CANVAS_WIDTH; x += 20) {
+                            ctx.lineTo(x, y + Math.sin(this.time * 3 + x * 0.02) * 5);
+                        }
+                        ctx.stroke();
+                        ctx.globalAlpha = 1;
+                    }
+                } else if (this.theme === 'temple') {
+                    // Divine light rays
+                    for (let i = 0; i < 4; i++) {
+                        const x = CONFIG.CANVAS_WIDTH * (0.2 + i * 0.2);
+                        ctx.globalAlpha = 0.15;
+                        ctx.fillStyle = '#ffff99';
+                        ctx.fillRect(x - 10, 0, 20, CONFIG.CANVAS_HEIGHT);
+                    }
+                    ctx.globalAlpha = 1;
+                }
+            }
+        }
+
+        class Zone {
+            constructor(index, name, description, theme, enemyTypes, bossType, loreData = {}) {
+                this.index = index;
+                this.name = name;
+                this.description = description;
+                this.theme = theme;
+                this.enemyTypes = enemyTypes;
+                this.bossType = bossType;
+                this.map = new GameMap(40, 22, theme);
+                this.enemies = [];
+                this.boss = null;
+                this.projectiles = [];
+                this.spawnTimer = 0;
+                this.spawned = false;
+                this.defeated = false;
+                this.screenShake = 0;
+                this.damageFlash = 0;
+                this.loreData = loreData;
+                this.floatingTexts = [];
+                // Zone scaling multipliers
+                this.zoneScaleMultipliers = [1.0, 1.3, 1.6, 2.0, 2.5, 3.0];
+            }
+
+            getZoneEnemyMultiplier() {
+                return this.zoneScaleMultipliers[Math.min(this.index, 5)];
+            }
+
+            spawnEnemies() {
+                const diffBonus = globalDifficulty.enemyCountBonus;
+                const baseCount = 3 + this.index * 2 + diffBonus;
+                for (let i = 0; i < baseCount; i++) {
+                    const x = Math.random() * (CONFIG.CANVAS_WIDTH - 32) + 16;
+                    const y = Math.random() * (CONFIG.CANVAS_HEIGHT - 32) + 16;
+                    const type = this.enemyTypes[Math.floor(Math.random() * this.enemyTypes.length)];
+                    const enemy = new Enemy(x, y, type);
+                    // Apply difficulty and zone multipliers
+                    const totalHpMult = globalDifficulty.enemyHpMultiplier * this.getZoneEnemyMultiplier();
+                    const totalDmgMult = globalDifficulty.enemyDamageMultiplier * this.getZoneEnemyMultiplier();
+                    const totalSpdMult = globalDifficulty.enemySpeedMultiplier;
+                    enemy.maxHp = Math.floor(enemy.maxHp * totalHpMult);
+                    enemy.hp = enemy.maxHp;
+                    enemy.damage = Math.floor(enemy.damage * totalDmgMult);
+                    enemy.speed = Math.floor(enemy.speed * totalSpdMult);
+                    this.enemies.push(enemy);
+                }
+            }
+
+            spawnBoss() {
+                this.boss = new Boss(CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, this.bossType, this.index);
+                // Apply zone scaling to boss
+                const zoneMultiplier = this.getZoneEnemyMultiplier();
+                const totalHpMult = globalDifficulty.enemyHpMultiplier * zoneMultiplier;
+                const totalDmgMult = globalDifficulty.enemyDamageMultiplier * zoneMultiplier;
+                const totalSpdMult = globalDifficulty.enemySpeedMultiplier;
+                this.boss.maxHp = Math.floor(this.boss.maxHp * totalHpMult);
+                this.boss.hp = this.boss.maxHp;
+                this.boss.damage = Math.floor(this.boss.damage * totalDmgMult);
+                this.boss.speed = Math.floor(this.boss.speed * totalSpdMult);
+            }
+
+            update(dt, players) {
+                this.map.update(dt);
+                this.screenShake = Math.max(0, this.screenShake - dt * 5);
+                this.damageFlash = Math.max(0, this.damageFlash - dt * 3);
+
+                if (!this.spawned) {
+                    this.spawnEnemies();
+                    this.spawned = true;
+                }
+
+                // Actualizar enemigos
+                this.enemies = this.enemies.filter(e => e.active);
+                for (let enemy of this.enemies) {
+                    enemy.update(dt, players);
+                }
+
+                // Spawn boss when all regular enemies are defeated
+                if (!this.boss && this.enemies.length === 0 && this.spawned) {
+                    this.spawnBoss();
+                }
+
+                // Actualizar boss
+                if (this.boss) {
+                    this.boss.update(dt, players);
+                    const bossProjectiles = this.boss.getAttackPattern(dt);
+                    this.projectiles.push(...bossProjectiles);
+                }
+
+                // Actualizar proyectiles
+                this.projectiles = this.projectiles.filter(p => p.active);
+                for (let proj of this.projectiles) {
+                    proj.update(dt);
+                }
+
+                // Spawn más enemigos solo si el boss aún no ha aparecido
+                this.spawnTimer += dt;
+                if (!this.boss && this.spawnTimer > 5 && this.enemies.length < 3 + this.index && this.enemies.length > 0) {
+                    const x = Math.random() * (CONFIG.CANVAS_WIDTH - 32) + 16;
+                    const y = Math.random() * (CONFIG.CANVAS_HEIGHT - 32) + 16;
+                    const type = this.enemyTypes[Math.floor(Math.random() * this.enemyTypes.length)];
+                    this.enemies.push(new Enemy(x, y, type));
+                    this.spawnTimer = 0;
+                }
+
+                // Detección de colisiones y daño (pausado durante cinemática de boss)
+                if (!this.bossDeathTimer) {
+                    for (let player of players) {
+                        // Con enemigos
+                        for (let enemy of this.enemies) {
+                            if (player.intersects(enemy) && player.invulnerableTimer <= 0) {
+                                player.takeDamage(enemy.damage);
+                                this.screenShake = 0.1;
+                                this.damageFlash = 0.15;
+                            }
+                        }
+
+                        // Con boss
+                        if (this.boss && player.intersects(this.boss) && player.invulnerableTimer <= 0) {
+                            player.takeDamage(this.boss.damage);
+                            this.screenShake = 0.2;
+                            this.damageFlash = 0.2;
+                        }
+                    }
+                }
+
+                // Daño de proyectiles
+                for (let proj of this.projectiles) {
+                    if (proj.owner === 'player') {
+                        for (let enemy of this.enemies) {
+                            if (proj.intersects(enemy)) {
+                                enemy.takeDamage(proj.damage);
+                                proj.active = false;
+                                particleSystem.burst(proj.position.x, proj.position.y, 8, 100, 0.3, ['#ffff00', '#ffaa00']);
+                            }
+                        }
+                        if (this.boss && proj.intersects(this.boss)) {
+                            this.boss.takeDamage(proj.damage);
+                            proj.active = false;
+                            particleSystem.burst(proj.position.x, proj.position.y, 12, 120, 0.4, ['#ffff00', '#ffaa00', '#ff6600']);
+                            this.screenShake = 0.15;
+                        }
+                    } else {
+                        for (let p of players) {
+                            if (proj.intersects(p) && p.invulnerableTimer <= 0 && !p.isDodging) {
+                                p.takeDamage(proj.damage);
+                                proj.active = false;
+                                this.damageFlash = 0.2;
+                                particleSystem.burst(proj.position.x, proj.position.y, 6, 100, 0.3, ['#ff0000', '#ff6666']);
+                            }
+                        }
+                    }
+                }
+
+                // Remover enemigos derrotados y generar monedas
+                for (let enemy of this.enemies.filter(e => e.isDefeated())) {
+                    particleSystem.burst(enemy.position.x, enemy.position.y, 12, 150, 0.5, ['#ff8800', '#ffcc00']);
+                    // Drop coins
+                    const coinAmount = 1 + Math.floor(Math.random() * 3);
+                    const closestPlayer = players.reduce((closest, p) => {
+                        const d1 = p.position.distance(enemy.position);
+                        const d2 = closest.position.distance(enemy.position);
+                        return d1 < d2 ? p : closest;
+                    });
+                    closestPlayer.addCoins(coinAmount);
+                    this.floatingTexts.push(new FloatingText(enemy.position.x, enemy.position.y, `+${coinAmount}`, '#ffd700', 1));
+                }
+                this.enemies = this.enemies.filter(e => !e.isDefeated());
+
+                // Verificar si boss fue derrotado
+                if (this.boss && this.boss.isDefeated() && !this.bossDeathTimer) {
+                    this.bossDeathTimer = 2.5;
+                    this.bossDeathPos = { x: this.boss.position.x + 24, y: this.boss.position.y + 24 };
+                    this.bossDeathPhase = 0;
+                    // Initial explosion
+                    particleSystem.burst(this.bossDeathPos.x, this.bossDeathPos.y, 60, 250, 1.0, ['#ffff00', '#ff8800', '#ff0000']);
+                    audioSystem.playSfx('victory');
+                    // Boss coins distributed to all living players
+                    const coinAmount = 15 + Math.floor(Math.random() * 11);
+                    const livingPlayers = players.filter(p => p.hp > 0);
+                    if (livingPlayers.length > 0) {
+                        const coinsPerPlayer = Math.floor(coinAmount / livingPlayers.length);
+                        for (let p of livingPlayers) {
+                            p.addCoins(coinsPerPlayer);
+                            this.floatingTexts.push(new FloatingText(p.position.x, p.position.y, `+${coinsPerPlayer}`, '#ffff00', 1));
+                        }
+                    }
+                }
+
+                // Boss death cinematic
+                if (this.bossDeathTimer && this.bossDeathTimer > 0) {
+                    this.bossDeathTimer -= dt;
+                    this.bossDeathPhase += dt;
+
+                    // Screen shake during death
+                    this.screenShake = Math.min(1, this.bossDeathTimer / 2);
+
+                    // Chain explosions at random offsets
+                    if (Math.random() < 0.3) {
+                        const ox = (Math.random() - 0.5) * 80;
+                        const oy = (Math.random() - 0.5) * 80;
+                        const colors = [
+                            ['#ffff00', '#ffaa00', '#ff6600'],
+                            ['#ffffff', '#ffddaa', '#ff8800'],
+                            ['#ff4444', '#ff8800', '#ffcc00']
+                        ];
+                        const c = colors[Math.floor(Math.random() * colors.length)];
+                        particleSystem.burst(this.bossDeathPos.x + ox, this.bossDeathPos.y + oy, 15 + Math.floor(Math.random() * 20), 150, 0.5, c);
+                    }
+
+                    // Smoke puffs
+                    if (Math.random() < 0.2) {
+                        const ox = (Math.random() - 0.5) * 60;
+                        const oy = (Math.random() - 0.5) * 60;
+                        particleSystem.burst(this.bossDeathPos.x + ox, this.bossDeathPos.y + oy, 8, 60, 0.8, ['#888888', '#aaaaaa', '#cccccc']);
+                    }
+
+                    // Final big explosion before transition
+                    if (this.bossDeathTimer <= 0) {
+                        this.defeated = true;
+                        particleSystem.burst(this.bossDeathPos.x, this.bossDeathPos.y, 100, 350, 1.2, ['#ffffff', '#ffff00', '#ffaa00', '#ff0000']);
+                    }
+
+                    // Hide boss sprite
+                    this.boss = null;
+                }
+
+                // Update floating texts
+                this.floatingTexts = this.floatingTexts.filter(ft => ft.isAlive());
+                for (let ft of this.floatingTexts) {
+                    ft.update(dt);
+                }
+            }
+
+            draw(ctx) {
+                // Screen shake
+                let shakeX = 0, shakeY = 0;
+                if (this.screenShake > 0) {
+                    shakeX = (Math.random() - 0.5) * 4 * this.screenShake;
+                    shakeY = (Math.random() - 0.5) * 4 * this.screenShake;
+                }
+
+                ctx.save();
+                ctx.translate(shakeX, shakeY);
+
+                this.map.draw(ctx);
+
+                for (let enemy of this.enemies) {
+                    enemy.draw(ctx);
+                }
+
+                if (this.boss) {
+                    this.boss.draw(ctx);
+                }
+
+                particleSystem.draw(ctx);
+
+                for (let proj of this.projectiles) {
+                    proj.draw(ctx);
+                }
+
+                for (let ft of this.floatingTexts) {
+                    ft.draw(ctx);
+                }
+
+                ctx.restore();
+
+                // Damage flash
+                if (this.damageFlash > 0) {
+                    ctx.globalAlpha = this.damageFlash * 0.3;
+                    ctx.fillStyle = '#ff0000';
+                    ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                    ctx.globalAlpha = 1;
+                }
+            }
+
+            isBossSpawned() {
+                return this.boss !== null;
+            }
+
+            allEnemiesDefeated() {
+                return this.enemies.length === 0 && !this.boss;
+            }
+        }
+
+        // ==================== PANTALLAS ====================
+        class Screen {
+            update(dt) {}
+            draw(ctx) {}
+            handleInput(inputManager) {}
+        }
+
+        class TitleScreen extends Screen {
+            constructor() {
+                super();
+                this.timer = 0;
+            }
+
+            draw(ctx) {
+                // Starry background
+                ctx.fillStyle = '#000511';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Twinkling stars
+                for (let i = 0; i < 100; i++) {
+                    const x = (Math.sin(i) * CONFIG.CANVAS_WIDTH + CONFIG.CANVAS_WIDTH) % CONFIG.CANVAS_WIDTH;
+                    const y = (Math.cos(i * 1.3) * CONFIG.CANVAS_HEIGHT + CONFIG.CANVAS_HEIGHT) % CONFIG.CANVAS_HEIGHT;
+                    const brightness = (Math.sin(this.timer * 2 + i) * 0.5 + 0.5);
+                    ctx.fillStyle = `rgba(255, 255, 255, ${brightness * 0.7})`;
+                    ctx.fillRect(x, y, 1, 1);
+                }
+
+                // Floating golden particles
+                for (let i = 0; i < 20; i++) {
+                    const x = CONFIG.CANVAS_WIDTH * 0.5 + Math.sin(this.timer + i) * 150;
+                    const y = CONFIG.CANVAS_HEIGHT * 0.5 + Math.cos(this.timer * 0.7 + i) * 100 + i * 15;
+                    ctx.globalAlpha = Math.sin(this.timer * 1.5 + i) * 0.5 + 0.3;
+                    ctx.fillStyle = '#ffd700';
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.globalAlpha = 1;
+
+                // Grail chalice
+                const grailX = CONFIG.CANVAS_WIDTH / 2;
+                const grailY = 180 + Math.sin(this.timer * 2) * 5;
+                ctx.globalCompositeOperation = 'lighter';
+                ctx.globalAlpha = 0.6;
+                ctx.fillStyle = '#ffd700';
+                ctx.fillRect(grailX - 30, grailY - 20, 60, 40);
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+
+                // Grail glow
+                ctx.fillStyle = '#ffff99';
+                ctx.fillRect(grailX - 30, grailY - 20, 60, 40);
+
+                // Título with glow
+                ctx.globalCompositeOperation = 'lighter';
+                for (let i = 0; i < 3; i++) {
+                    ctx.globalAlpha = (1 - i / 3) * 0.2;
+                    ctx.fillStyle = '#ffd700';
+                    ctx.font = `bold ${72 + i * 4}px Arial`;
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Crónicas del Grial', CONFIG.CANVAS_WIDTH / 2, 250);
+                }
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 72px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Crónicas del Grial', CONFIG.CANVAS_WIDTH / 2, 250);
+
+                // Subtítulo
+                ctx.fillStyle = '#ffff99';
+                ctx.font = '28px Arial';
+                ctx.fillText('Una aventura épica', CONFIG.CANVAS_WIDTH / 2, 310);
+
+                // Instructions
+                ctx.fillStyle = '#aaa';
+                ctx.font = '18px Arial';
+                ctx.fillText('Presiona SPACE o A del mando para comenzar', CONFIG.CANVAS_WIDTH / 2, 400);
+                ctx.fillText('Conecta hasta 4 mandos para jugar en grupo', CONFIG.CANVAS_WIDTH / 2, 430);
+
+                // Lore
+                ctx.fillStyle = '#888';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'left';
+                const loreText = 'El Santo Grial ha desaparecido del reino de Aurelia.\nEl caos se ha apoderado de las tierras.\nTú, valiente caballero, debes recuperarlo.';
+                const lines = loreText.split('\n');
+                lines.forEach((line, i) => {
+                    ctx.fillText(line, 80, 490 + i * 24);
+                });
+
+                // Controls display
+                ctx.fillStyle = '#666';
+                ctx.font = '12px monospace';
+                ctx.textAlign = 'left';
+                const controlsY = 560;
+                ctx.fillText('CONTROLES', 80, controlsY);
+                ctx.fillText('═══════════════════════════════', 80, controlsY + 15);
+                ctx.fillText('Jugador 1 (Teclado):', 80, controlsY + 30);
+                ctx.fillText('  Mover: WASD / Flechas | Atacar: SPACE/Enter | Especial: K | Esquivar: L', 80, controlsY + 44);
+                ctx.fillText('Jugadores 2-4 (Mando):', 80, controlsY + 58);
+                ctx.fillText('  Mover: Stick izquierdo | Atacar: A/X | Especial: B/Y | Esquivar: RB/RT | Interactuar: Start', 80, controlsY + 72);
+
+                // Pulsing prompt
+                const pulseAlpha = Math.sin(this.timer * 4) * 0.3 + 0.4;
+                ctx.globalAlpha = pulseAlpha;
+                ctx.fillStyle = '#ffff00';
+                ctx.font = '16px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('▼ SPACE / A ▼', CONFIG.CANVAS_WIDTH / 2, 670);
+                ctx.globalAlpha = 1;
+            }
+
+            update(dt) {
+                this.timer += dt;
+            }
+
+            handleInput(inputManager) {
+                if (inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter') || inputManager.anyGamepadConfirm()) {
+                    return 'PLAYER_COUNT_SELECT';
+                }
+                return null;
+            }
+        }
+
+        class PlayerCountSelectScreen extends Screen {
+            constructor() {
+                super();
+                this.selectedCount = 0;
+                this.timer = 0;
+                this.inputCooldown = 0;
+            }
+
+            draw(ctx) {
+                // Gradient background
+                const gradient = ctx.createLinearGradient(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                gradient.addColorStop(0, '#1a1a3e');
+                gradient.addColorStop(1, '#16213e');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Title
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 48px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('¿Cuántos jugadores?', CONFIG.CANVAS_WIDTH / 2, 80);
+
+                // Player count options
+                const options = [1, 2, 3, 4];
+                let yPos = 200;
+
+                for (let i = 0; i < options.length; i++) {
+                    const isSelected = this.selectedCount === i;
+                    const count = options[i];
+
+                    // Highlight selected
+                    if (isSelected) {
+                        ctx.globalCompositeOperation = 'lighter';
+                        ctx.globalAlpha = 0.3;
+                        ctx.fillStyle = '#ffff00';
+                        ctx.fillRect(300, yPos - 40, 680, 80);
+                        ctx.globalAlpha = 1;
+                        ctx.globalCompositeOperation = 'source-over';
+
+                        ctx.strokeStyle = '#ffff00';
+                        ctx.lineWidth = 3;
+                        ctx.strokeRect(300, yPos - 40, 680, 80);
+                    }
+
+                    // Number
+                    ctx.fillStyle = isSelected ? '#ffff00' : '#fff';
+                    ctx.font = isSelected ? 'bold 48px Arial' : '40px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(count, CONFIG.CANVAS_WIDTH / 2, yPos);
+
+                    // Description
+                    ctx.fillStyle = isSelected ? '#ffff99' : '#aaa';
+                    ctx.font = '16px Arial';
+                    let description = '';
+                    if (count === 1) {
+                        description = 'Solo (Teclado o Mando)';
+                    } else {
+                        description = `${count} jugadores (Teclado y/o Mandos)`;
+                    }
+                    ctx.fillText(description, CONFIG.CANVAS_WIDTH / 2, yPos + 40);
+
+                    // Gamepad icons for additional players
+                    if (count > 1) {
+                        let iconX = CONFIG.CANVAS_WIDTH / 2 - (count - 1) * 40;
+                        for (let j = 1; j < count; j++) {
+                            ctx.fillStyle = '#666';
+                            ctx.fillRect(iconX, yPos + 60, 20, 20);
+                            ctx.fillStyle = '#fff';
+                            ctx.font = '10px Arial';
+                            ctx.textAlign = 'center';
+                            ctx.fillText('🎮', iconX + 10, yPos + 72);
+                            iconX += 40;
+                        }
+                    }
+
+                    yPos += 140;
+                }
+
+                // Instructions
+                ctx.fillStyle = '#aaa';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Teclado: W/S o Flechas + SPACE  |  Mando: Stick + A/X  |  ESC/B: Atrás', CONFIG.CANVAS_WIDTH / 2, 670);
+            }
+
+            update(dt) {
+                this.timer += dt;
+            }
+
+            handleInput(inputManager) {
+                this.inputCooldown = Math.max(0, this.inputCooldown - 0.016);
+                if (this.inputCooldown > 0) return null;
+
+                if (inputManager.isKeyPressed('Escape') || inputManager.anyGamepadBack()) {
+                    audioSystem.playSfx('menuBack');
+                    this.inputCooldown = 0.3;
+                    return 'TITLE';
+                }
+
+                const kbUp = inputManager.isKeyPressed('ArrowUp') || inputManager.isKeyPressed('w') || inputManager.isKeyPressed('W');
+                const kbDown = inputManager.isKeyPressed('ArrowDown') || inputManager.isKeyPressed('s') || inputManager.isKeyPressed('S');
+                const kbConfirm = inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter');
+
+                if (kbUp || inputManager.anyGamepadUp()) {
+                    this.selectedCount = (this.selectedCount - 1 + 4) % 4;
+                    this.inputCooldown = 0.2;
+                    audioSystem.playSfx('menuSelect');
+                }
+                if (kbDown || inputManager.anyGamepadDown()) {
+                    this.selectedCount = (this.selectedCount + 1) % 4;
+                    this.inputCooldown = 0.2;
+                    audioSystem.playSfx('menuSelect');
+                }
+
+                if (kbConfirm || inputManager.anyGamepadConfirm()) {
+                    const playerCount = this.selectedCount + 1;
+                    return { nextState: 'DIFFICULTY_SELECT', playerCount: playerCount };
+                }
+
+                return null;
+            }
+        }
+
+        class CharacterSelectScreen extends Screen {
+            constructor(playerCount = 1) {
+                super();
+                this.playerCount = playerCount;
+                this.selectedClasses = [];
+                this.currentPlayer = 0;
+                this.classes = ['CABALLERO', 'MAGO', 'PICARO', 'CLERIGO'];
+                this.classIndex = 0;
+                this.selectionTime = 0;
+                this.inputCooldown = 0;
+            }
+
+            draw(ctx) {
+                // Gradient background
+                const gradient = ctx.createLinearGradient(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                gradient.addColorStop(0, '#1a1a3e');
+                gradient.addColorStop(1, '#16213e');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Title
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 48px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Jugador ${this.currentPlayer + 1} - Elige tu clase`, CONFIG.CANVAS_WIDTH / 2, 60);
+
+                // Show classes
+                let yPos = 140;
+                for (let i = 0; i < this.classes.length; i++) {
+                    const classKey = this.classes[i];
+                    const classData = CHARACTER_CLASSES[classKey];
+                    const isSelected = this.classIndex === i;
+
+                    // Glowing border for selected
+                    if (isSelected) {
+                        ctx.globalCompositeOperation = 'lighter';
+                        ctx.globalAlpha = 0.3;
+                        ctx.fillStyle = classData.glowColor;
+                        ctx.fillRect(100, yPos - 30, CONFIG.CANVAS_WIDTH - 200, 70);
+                        ctx.globalAlpha = 1;
+                        ctx.globalCompositeOperation = 'source-over';
+
+                        ctx.strokeStyle = classData.glowColor;
+                        ctx.lineWidth = 3;
+                        ctx.strokeRect(100, yPos - 30, CONFIG.CANVAS_WIDTH - 200, 70);
+                    }
+
+                    // Class name
+                    ctx.fillStyle = isSelected ? '#ffff00' : '#fff';
+                    ctx.font = isSelected ? 'bold 32px Arial' : '24px Arial';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(`${i + 1}. ${classData.name}`, 150, yPos);
+
+                    // Description
+                    ctx.font = '14px Arial';
+                    ctx.fillStyle = '#aaa';
+                    ctx.fillText(classData.desc, 150, yPos + 28);
+
+                    // Stats bars
+                    const statX = 500;
+                    const statY = yPos + 10;
+                    const barHeight = 6;
+                    const barWidth = 100;
+
+                    // HP bar
+                    ctx.fillStyle = '#00ff00';
+                    ctx.fillText('HP', 470, statY + 3);
+                    ctx.fillRect(statX, statY - 3, (classData.maxHp / 120) * barWidth, barHeight);
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(statX, statY - 3, barWidth, barHeight);
+
+                    // ATK bar
+                    ctx.fillStyle = '#ff6b6b';
+                    ctx.fillText('ATK', 470, statY + 20);
+                    ctx.fillRect(statX, statY + 14, (classData.attack / 25) * barWidth, barHeight);
+                    ctx.strokeStyle = '#fff';
+                    ctx.strokeRect(statX, statY + 14, barWidth, barHeight);
+
+                    // DEF bar
+                    ctx.fillStyle = '#4a9aff';
+                    ctx.fillText('DEF', 470, statY + 37);
+                    ctx.fillRect(statX, statY + 31, (classData.defense / 10) * barWidth, barHeight);
+                    ctx.strokeStyle = '#fff';
+                    ctx.strokeRect(statX, statY + 31, barWidth, barHeight);
+
+                    // SPD bar
+                    ctx.fillStyle = '#ffcc00';
+                    ctx.fillText('SPD', 470, statY + 54);
+                    ctx.fillRect(statX, statY + 48, (classData.speed / 350) * barWidth, barHeight);
+                    ctx.strokeStyle = '#fff';
+                    ctx.strokeRect(statX, statY + 48, barWidth, barHeight);
+
+                    yPos += 100;
+                }
+
+                // Controls info
+                ctx.fillStyle = '#aaa';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Teclado: W/S o Flechas + SPACE  |  Mando: Stick + A/X  |  ESC/B: Atrás', CONFIG.CANVAS_WIDTH / 2, 620);
+                ctx.fillText(`Progreso: ${this.currentPlayer + 1}/${this.playerCount}`, CONFIG.CANVAS_WIDTH / 2, 650);
+            }
+
+            update(dt) {
+                this.selectionTime += dt;
+            }
+
+            handleInput(inputManager) {
+                this.inputCooldown = Math.max(0, this.inputCooldown - 0.016);
+                if (this.inputCooldown > 0) return null;
+
+                if (inputManager.isKeyPressed('Escape') || inputManager.anyGamepadBack()) {
+                    audioSystem.playSfx('menuBack');
+                    this.inputCooldown = 0.3;
+                    if (this.currentPlayer > 0) {
+                        // Undo last character selection
+                        this.currentPlayer--;
+                        this.selectedClasses.pop();
+                        this.classIndex = 0;
+                    } else {
+                        return 'DIFFICULTY_SELECT';
+                    }
+                    return null;
+                }
+
+                // Accept both keyboard AND gamepad for ALL players
+                const kbUp = inputManager.isKeyPressed('ArrowUp') || inputManager.isKeyPressed('w') || inputManager.isKeyPressed('W');
+                const kbDown = inputManager.isKeyPressed('ArrowDown') || inputManager.isKeyPressed('s') || inputManager.isKeyPressed('S');
+                const kbConfirm = inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter');
+
+                const moveUp = kbUp || inputManager.anyGamepadUp();
+                const moveDown = kbDown || inputManager.anyGamepadDown();
+                const confirm = kbConfirm || inputManager.anyGamepadConfirm();
+
+                if (moveUp) {
+                    this.classIndex = (this.classIndex - 1 + this.classes.length) % this.classes.length;
+                    this.inputCooldown = 0.2;
+                    audioSystem.playSfx('menuSelect');
+                }
+                if (moveDown) {
+                    this.classIndex = (this.classIndex + 1) % this.classes.length;
+                    this.inputCooldown = 0.2;
+                    audioSystem.playSfx('menuSelect');
+                }
+
+                if (confirm) {
+                    const selectedClass = this.classes[this.classIndex];
+                    this.selectedClasses.push(selectedClass);
+                    this.currentPlayer++;
+                    this.inputCooldown = 0.3;
+
+                    if (this.currentPlayer >= this.playerCount) {
+                        return { nextState: 'PLAYING', selectedClasses: this.selectedClasses };
+                    } else {
+                        this.classIndex = 0;
+                    }
+                }
+
+                return null;
+            }
+        }
+
+        class DifficultySelectScreen extends Screen {
+            constructor() {
+                super();
+                this.selectedDifficulty = 0;
+                this.timer = 0;
+                this.inputCooldown = 0;
+                this.difficulties = ['FACIL', 'INTERMEDIO', 'DIFICIL', 'LEYENDA'];
+            }
+
+            draw(ctx) {
+                // Gradient background
+                const gradient = ctx.createLinearGradient(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                gradient.addColorStop(0, '#1a1a3e');
+                gradient.addColorStop(1, '#16213e');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Title
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 48px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Elige tu dificultad', CONFIG.CANVAS_WIDTH / 2, 80);
+
+                // Difficulty options
+                let yPos = 180;
+                const difficulties = [
+                    { key: 'FACIL', label: 'Fácil', color: '#22dd22' },
+                    { key: 'INTERMEDIO', label: 'Intermedio', color: '#ffff44' },
+                    { key: 'DIFICIL', label: 'Difícil', color: '#ff8833' },
+                    { key: 'LEYENDA', label: 'Leyenda 💀', color: '#ff3333' }
+                ];
+
+                for (let i = 0; i < difficulties.length; i++) {
+                    const diff = difficulties[i];
+                    const isSelected = this.selectedDifficulty === i;
+
+                    // Highlight selected
+                    if (isSelected) {
+                        ctx.globalCompositeOperation = 'lighter';
+                        ctx.globalAlpha = 0.3;
+                        ctx.fillStyle = diff.color;
+                        ctx.fillRect(250, yPos - 35, 780, 70);
+                        ctx.globalAlpha = 1;
+                        ctx.globalCompositeOperation = 'source-over';
+
+                        ctx.strokeStyle = diff.color;
+                        ctx.lineWidth = 3;
+                        ctx.strokeRect(250, yPos - 35, 780, 70);
+                    }
+
+                    // Label
+                    ctx.fillStyle = isSelected ? diff.color : '#fff';
+                    ctx.font = isSelected ? 'bold 36px Arial' : '32px Arial';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(diff.label, 300, yPos + 5);
+
+                    // Description
+                    const settings = DIFFICULTY_SETTINGS[diff.key];
+                    const descTexts = {
+                        FACIL: `Enemigos normales - Perfecto para principiantes`,
+                        INTERMEDIO: `Enemigos x1.5 HP, x1.3 DAÑ, +2 enemigos`,
+                        DIFICIL: `Enemigos x2.2 HP, x1.8 DAÑ, +4 enemigos - +50% monedas`,
+                        LEYENDA: `Enemigos x3.5 HP, x2.5 DAÑ, +6 enemigos - +100% monedas 💀`
+                    };
+
+                    ctx.fillStyle = isSelected ? '#ffff99' : '#aaa';
+                    ctx.font = '14px Arial';
+                    ctx.fillText(descTexts[diff.key], 300, yPos + 30);
+
+                    yPos += 120;
+                }
+
+                // Instructions
+                ctx.fillStyle = '#aaa';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Teclado: W/S o Flechas + SPACE  |  Mando: Stick + A/X  |  ESC/B: Atrás', CONFIG.CANVAS_WIDTH / 2, 670);
+            }
+
+            update(dt) {
+                this.timer += dt;
+            }
+
+            handleInput(inputManager) {
+                this.inputCooldown = Math.max(0, this.inputCooldown - 0.016);
+                if (this.inputCooldown > 0) return null;
+
+                if (inputManager.isKeyPressed('Escape') || inputManager.anyGamepadBack()) {
+                    audioSystem.playSfx('menuBack');
+                    this.inputCooldown = 0.3;
+                    return 'PLAYER_COUNT_SELECT';
+                }
+
+                const kbUp = inputManager.isKeyPressed('ArrowUp') || inputManager.isKeyPressed('w') || inputManager.isKeyPressed('W');
+                const kbDown = inputManager.isKeyPressed('ArrowDown') || inputManager.isKeyPressed('s') || inputManager.isKeyPressed('S');
+                const kbConfirm = inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter');
+
+                if (kbUp || inputManager.anyGamepadUp()) {
+                    this.selectedDifficulty = (this.selectedDifficulty - 1 + 4) % 4;
+                    this.inputCooldown = 0.2;
+                    audioSystem.playSfx('menuSelect');
+                }
+                if (kbDown || inputManager.anyGamepadDown()) {
+                    this.selectedDifficulty = (this.selectedDifficulty + 1) % 4;
+                    this.inputCooldown = 0.2;
+                    audioSystem.playSfx('menuSelect');
+                }
+
+                if (kbConfirm || inputManager.anyGamepadConfirm()) {
+                    globalDifficulty = DIFFICULTY_SETTINGS[this.difficulties[this.selectedDifficulty]];
+                    return 'CHARACTER_SELECT';
+                }
+
+                return null;
+            }
+        }
+
+        class GameplayScreen extends Screen {
+            constructor(selectedClasses) {
+                super();
+                this.players = [];
+                this.currentZoneIndex = 0;
+                this.zone = null;
+                this.paused = false;
+                this.pauseOption = 0; // 0: Continuar, 1: Nueva Partida
+                this.pauseCooldown = 0;
+                this.zones = [
+                    new Zone(0, 'Villa Roble', 'Has llegado a Villa Roble, una aldea tranquila donde la vida parecía pacífica… hasta que la desaparición del Santo Grial sumió al reino en el caos.', 'village', ['bandido'], 'capitanBandido', {
+                        arrival: "Has llegado a Villa Roble, una aldea tranquila donde la vida parecía pacífica… hasta que la desaparición del Santo Grial sumió al reino en el caos. Tu viaje comienza aquí, valiente caballero.",
+                        exploration: "Los aldeanos murmuran sobre bandidos que han saqueado sus casas… tal vez encuentres pistas sobre el Grial aquí.",
+                        enemyDefeat: "Con cada bandido que cae, un poco de la paz perdida regresa a Villa Roble.",
+                        preBoss: "¡Intruso! Este pueblo ahora es mío, y no dejaré que me arrebates lo que es mío… ni un fragmento de reliquia.",
+                        postBoss: "Has liberado Villa Roble y aprendido tus primeras habilidades. El camino hacia el Grial apenas comienza…",
+                        pergamino: "Hace siglos, el Grial trajo paz y prosperidad a Aurelia. Su desaparición cambia todo."
+                    }),
+                    new Zone(1, 'Arboleda Negra', 'El aire se vuelve denso, y las ramas de los árboles parecen observarte. La magia del Grial que se perdió ha corrompido este bosque sagrado.', 'forest', ['raiz'], 'entAnciano', {
+                        arrival: "El aire se vuelve denso, y las ramas de los árboles parecen observarte. La magia del Grial que se perdió ha corrompido este bosque sagrado.",
+                        exploration: "Las raíces se mueven a tu paso… cada árbol parece susurrar advertencias. La Arboleda Negra guarda secretos antiguos y peligros mortales.",
+                        miniBoss: "Un espíritu menor emerge de los troncos. Parece enfurecido… ¿quizá el Grial lo despertó?",
+                        preBoss: "Soy el guardián de este bosque. El caos ha corrompido mi esencia, pero defenderé lo que queda de mi hogar hasta el último aliento.",
+                        postBoss: "El Ent Anciano cae y un fragmento de sabiduría del bosque se libera. Has desbloqueado a un nuevo aliado: el Arquero del Bosque.",
+                        pergamino: "Los druidas protegían estos bosques, pero la corrupción despertó espíritus guardianes."
+                    }),
+                    new Zone(2, 'Muralla de Hierro', 'El ruido de los martillos y la armadura resonando indica disciplina y rigor. Sin embargo, hay tensión: la ciudad parece vigilante y hostil.', 'fortress', ['soldado'], 'comandanteCaido', {
+                        arrival: "El ruido de los martillos y la armadura resonando indica disciplina y rigor. Sin embargo, hay tensión: la ciudad parece vigilante y hostil.",
+                        exploration: "Guardias entrenan sin descanso. Algunos murmuran sobre la tiranía del Comandante Caído y la desaparición del Grial que dejó la ciudad sin justicia.",
+                        miniBoss: "Un capitán corrupto intenta detenerte, ordenando ataques coordinados.",
+                        preBoss: "Habéis llegado lejos… pero aquí termina vuestra historia. Nadie perturba el orden de Muralla de Hierro sin pagar el precio.",
+                        postBoss: "El Comandante cae. La ciudad respira al fin. Has desbloqueado al Guardián del Muro, un aliado fiel a tu causa.",
+                        pergamino: "El orden militar era fuerte, pero sin el Grial, la tiranía corrompió a los líderes."
+                    }),
+                    new Zone(3, 'Aldea del Desvarío', 'Puertas que giran, casas al revés, y habitantes riendo de forma extraña. Este pueblo ha perdido el sentido común desde la desaparición del Grial.', 'chaos', ['loco'], 'caballerosNi', {
+                        arrival: "Puertas que giran, casas al revés, y habitantes riendo de forma extraña. Este pueblo ha perdido el sentido común desde la desaparición del Grial.",
+                        exploration: "Los objetos se mueven solos y los aldeanos parecen flotar en el aire. Prepárate para desafíos impredecibles.",
+                        miniBoss: "Un bufón oscuro te desafía. Su risa resuena como advertencia.",
+                        preBoss: "¡Ni! ¡Ni! ¡Ni! Solo los valientes entenderán el verdadero significado del caos que protegemos.",
+                        postBoss: "El absurdo se calma un momento. Has desbloqueado al Monje del Desvarío, maestro del caos controlado.",
+                        pergamino: "Los rituales absurdos son reflejo del caos del mundo; no todo es lo que parece."
+                    }),
+                    new Zone(4, 'Forja Carmesí', 'El calor es sofocante y el suelo tiembla bajo tus pies. El pueblo se ha convertido en un volcán activo.', 'volcano', ['demonio'], 'senorCrisol', {
+                        arrival: "El calor es sofocante y el suelo tiembla bajo tus pies. El pueblo se ha convertido en un volcán activo.",
+                        exploration: "Chispas y lava fluyen como ríos. Aquí la magia del Grial parece haberse fundido con el fuego, y todo arde sin control.",
+                        miniBoss: "Un herrero fusionado con magma surge, golpeando con su martillo ardiente.",
+                        preBoss: "¡Bienvenido, intruso! Quien se atreva a cruzar mis forjas, sentirá el poder de la lava y el fuego. ¡No dejaré que nadie toque lo que es mío!",
+                        postBoss: "La lava se enfría lentamente. Has desbloqueado al Forjador Ígneo, maestro del fuego y el daño en área.",
+                        pergamino: "El fuego del volcán refleja la ira de la magia perdida. La lava no perdona."
+                    }),
+                    new Zone(5, 'Santuario del Grial', 'El templo resplandece con la luz que aún queda del Grial. La corrupción y la magia inestable han creado guardianes imposibles de vencer sin cooperación.', 'temple', ['espectre'], 'guardianGrial', {
+                        arrival: "El templo resplandece con la luz que aún queda del Grial. La corrupción y la magia inestable han creado guardianes imposibles de vencer sin cooperación.",
+                        exploration: "El suelo vibra y runas brillan en las paredes. Cada paso que das parece resonar con la historia del reino y del Grial.",
+                        preBoss: "Has recorrido un largo camino… pero solo aquellos que dominan todas las habilidades y la cooperación podrán enfrentarme.",
+                        duringBoss: "Usa todo lo que has aprendido, invoca a tus aliados y domina la magia del Grial perdido.",
+                        postBoss: "El Grial se ilumina y la corrupción desaparece… al menos por ahora. Has restaurado parte del equilibrio del reino. Tu viaje queda registrado en las crónicas de Aurelia."
+                    })
+                ];
+
+                // Crear jugadores
+                const startPositions = [
+                    { x: 200, y: 300 },
+                    { x: 250, y: 350 },
+                    { x: 200, y: 350 },
+                    { x: 250, y: 300 }
+                ];
+
+                for (let i = 0; i < selectedClasses.length; i++) {
+                    const player = new Player(startPositions[i].x, startPositions[i].y, selectedClasses[i], i);
+                    this.players.push(player);
+                }
+
+                this.loadZone(0);
+                this.showLoreTimer = 0;
+                this.showControlsHelp = true;
+                this.controlsHelpTimer = 10;
+            }
+
+            loadZone(index) {
+                this.currentZoneIndex = index;
+                this.zone = this.zones[index];
+                this.showLoreTimer = 0;
+
+                // Reset players position
+                const startPositions = [
+                    { x: 200, y: 300 },
+                    { x: 250, y: 350 },
+                    { x: 200, y: 350 },
+                    { x: 250, y: 300 }
+                ];
+
+                for (let i = 0; i < this.players.length; i++) {
+                    this.players[i].position = new Vector2(startPositions[i].x, startPositions[i].y);
+                    this.players[i].hp = this.players[i].maxHp;
+                }
+            }
+
+            update(dt) {
+                this.pauseCooldown = Math.max(0, this.pauseCooldown - dt);
+
+                // Pause toggle
+                if (this.pauseCooldown <= 0 && (inputManager.isKeyPressed('Escape') || inputManager.anyGamepadBack())) {
+                    this.paused = !this.paused;
+                    this.pauseOption = 0;
+                    this.pauseCooldown = 0.3;
+                    return null;
+                }
+
+                if (this.paused) return null;
+
+                this.showLoreTimer = Math.max(0, this.showLoreTimer - dt);
+
+                // Handle H key for controls help toggle
+                if (inputManager.isKeyPressed('h') || inputManager.isKeyPressed('H')) {
+                    this.showControlsHelp = !this.showControlsHelp;
+                    this.controlsHelpTimer = 10;
+                }
+
+                // Auto-fade controls help
+                if (this.controlsHelpTimer > 0) {
+                    this.controlsHelpTimer -= dt;
+                    if (this.controlsHelpTimer <= 0) {
+                        this.showControlsHelp = false;
+                    }
+                }
+
+                // Update player input and entities
+                for (let i = 0; i < this.players.length; i++) {
+                    const inputState = inputManager.getPlayerInput(i);
+                    this.players[i].handleInput(inputState);
+                    this.players[i].update(dt);
+                }
+
+                // Crear proyectiles de jugadores y procesar habilidades especiales
+                const newProjectiles = [];
+                for (let player of this.players) {
+                    const projectiles = player.getAttackProjectiles();
+                    newProjectiles.push(...projectiles);
+
+                    // Clérigo: curación en área
+                    if (player.healAllNearby) {
+                        player.healAllNearby = false;
+                        const healAmount = player.healAmount || 30;
+                        for (let ally of this.players) {
+                            if (ally.hp > 0) {
+                                ally.heal(healAmount);
+                            }
+                        }
+                    }
+                }
+                this.zone.projectiles.push(...newProjectiles);
+
+                // Update zone
+                this.zone.update(dt, this.players);
+
+                // Check defeat condition
+                const allPlayersDead = this.players.every(p => p.hp <= 0);
+                if (allPlayersDead) {
+                    return 'GAME_OVER';
+                }
+
+                // Check victory condition
+                if (this.zone.defeated) {
+                    return 'ZONE_COMPLETE';
+                }
+
+                return null;
+            }
+
+            draw(ctx) {
+                this.zone.draw(ctx);
+
+                // Draw players and HUD
+                for (let i = 0; i < this.players.length; i++) {
+                    const player = this.players[i];
+                    player.draw(ctx);
+
+                    // HUD para cada jugador
+                    this.drawPlayerHUD(ctx, player, i);
+                }
+
+                // Zone name and lore
+                if (this.showLoreTimer > 0) {
+                    this.drawLoreBox(ctx);
+                }
+
+                // Controls help
+                if (this.showControlsHelp) {
+                    this.drawControlsHelp(ctx);
+                }
+
+                // Pause menu overlay
+                if (this.paused) {
+                    this.drawPauseMenu(ctx);
+                }
+            }
+
+            drawPlayerHUD(ctx, player, index) {
+                const hudX = 10 + index * 300;
+                const hudY = 10;
+
+                // Background
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(hudX - 2, hudY - 2, 290, 110);
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(hudX - 2, hudY - 2, 290, 110);
+
+                // Class name and level
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 12px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText(`P${player.index + 1}: ${player.classStats.name} Nv.${player.level}`, hudX + 5, hudY + 15);
+
+                // HP bar with gradient
+                const hpBarWidth = 150;
+                const hpBarHeight = 8;
+                const healthPercent = Math.max(0, player.hp / player.maxHp);
+                const hpColor = healthPercent > 0.5 ? '#00ff00' : healthPercent > 0.25 ? '#ffff00' : '#ff0000';
+
+                ctx.fillStyle = '#333';
+                ctx.fillRect(hudX + 5, hudY + 25, hpBarWidth, hpBarHeight);
+                ctx.fillStyle = hpColor;
+                ctx.fillRect(hudX + 5, hudY + 25, hpBarWidth * healthPercent, hpBarHeight);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(hudX + 5, hudY + 25, hpBarWidth, hpBarHeight);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = '10px Arial';
+                ctx.fillText(`HP: ${Math.ceil(player.hp)}/${player.maxHp}`, hudX + 5, hudY + 45);
+
+                // Energy bar
+                const energyPercent = player.energy / player.maxEnergy;
+                ctx.fillStyle = '#333';
+                ctx.fillRect(hudX + 5, hudY + 50, hpBarWidth, 4);
+                ctx.fillStyle = '#4169e1';
+                ctx.fillRect(hudX + 5, hudY + 50, hpBarWidth * energyPercent, 4);
+                ctx.fillStyle = '#fff';
+                ctx.font = '9px Arial';
+                ctx.fillText(`EN: ${Math.ceil(player.energy)}/100`, hudX + 5, hudY + 67);
+
+                // Coins display with icon
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 10px Arial';
+                ctx.fillText(`◉ ${player.coins}`, hudX + 5, hudY + 90);
+
+                // Combo counter
+                if (player.comboCounter > 1) {
+                    ctx.fillStyle = '#ffff00';
+                    ctx.font = 'bold 14px Arial';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(`COMBO x${player.comboCounter}`, hudX + 280, hudY + 30);
+                }
+            }
+
+            drawLoreBox(ctx) {
+                const boxWidth = 700;
+                const boxHeight = 160;
+                const boxX = CONFIG.CANVAS_WIDTH / 2 - boxWidth / 2;
+                const boxY = CONFIG.CANVAS_HEIGHT - 180;
+
+                const alpha = this.showLoreTimer > 3 ? 1 : this.showLoreTimer / 3;
+                ctx.globalAlpha = alpha;
+
+                // Background
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                ctx.fillRect(boxX - 5, boxY - 5, boxWidth + 10, boxHeight + 10);
+
+                // Golden border
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(boxX - 5, boxY - 5, boxWidth + 10, boxHeight + 10);
+
+                // Zone name
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 20px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`--- ${this.zone.name} ---`, CONFIG.CANVAS_WIDTH / 2, boxY + 25);
+
+                // Lore text
+                ctx.fillStyle = '#ccc';
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'center';
+                const lines = this.zone.description.split('\n');
+                lines.forEach((line, i) => {
+                    ctx.fillText(line, CONFIG.CANVAS_WIDTH / 2, boxY + 50 + i * 20);
+                });
+
+                ctx.globalAlpha = 1;
+            }
+
+            drawControlsHelp(ctx) {
+                if (!this.showControlsHelp) return;
+
+                const boxWidth = 320;
+                const boxHeight = 160;
+                const boxX = CONFIG.CANVAS_WIDTH - boxWidth - 20;
+                const boxY = CONFIG.CANVAS_HEIGHT - boxHeight - 20;
+
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
+
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 12px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText('CONTROLES', boxX + 10, boxY + 18);
+
+                ctx.fillStyle = '#aaa';
+                ctx.font = '10px Arial';
+                ctx.fillText('--- Teclado ---', boxX + 10, boxY + 35);
+                ctx.fillStyle = '#ccc';
+                ctx.font = '11px Arial';
+                ctx.fillText('WASD / Flechas: Mover', boxX + 10, boxY + 50);
+                ctx.fillText('SPACE/Enter: Atacar | K: Especial | L: Esquivar', boxX + 10, boxY + 64);
+
+                ctx.fillStyle = '#aaa';
+                ctx.font = '10px Arial';
+                ctx.fillText('--- Mando ---', boxX + 10, boxY + 82);
+                ctx.fillStyle = '#ccc';
+                ctx.font = '11px Arial';
+                ctx.fillText('Stick: Mover', boxX + 10, boxY + 97);
+                ctx.fillText('A/X: Atacar | B/Y: Especial | RB: Esquivar', boxX + 10, boxY + 111);
+
+                ctx.fillStyle = '#888';
+                ctx.font = '10px Arial';
+                ctx.fillText('Pulsa H para ocultar', boxX + 10, boxY + 135);
+            }
+
+            handleInput(inputManager) {
+                if (!this.paused) return null;
+
+                const kbUp = inputManager.isKeyPressed('ArrowUp') || inputManager.isKeyPressed('w') || inputManager.isKeyPressed('W');
+                const kbDown = inputManager.isKeyPressed('ArrowDown') || inputManager.isKeyPressed('s') || inputManager.isKeyPressed('S');
+                const kbConfirm = inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter');
+
+                if (kbUp || inputManager.anyGamepadUp()) {
+                    this.pauseOption = (this.pauseOption - 1 + 3) % 3;
+                    audioSystem.playSfx('menuSelect');
+                }
+                if (kbDown || inputManager.anyGamepadDown()) {
+                    this.pauseOption = (this.pauseOption + 1) % 3;
+                    audioSystem.playSfx('menuSelect');
+                }
+
+                if (kbConfirm || inputManager.anyGamepadConfirm()) {
+                    if (this.pauseOption === 0) {
+                        // Resume
+                        this.paused = false;
+                        this.pauseCooldown = 0.3;
+                    } else if (this.pauseOption === 1) {
+                        // New game
+                        return 'TITLE';
+                    } else if (this.pauseOption === 2) {
+                        // Resume (same as 0)
+                        this.paused = false;
+                        this.pauseCooldown = 0.3;
+                    }
+                }
+
+                return null;
+            }
+
+            drawPauseMenu(ctx) {
+                // Dim background
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Pause box
+                const boxW = 400;
+                const boxH = 280;
+                const boxX = (CONFIG.CANVAS_WIDTH - boxW) / 2;
+                const boxY = (CONFIG.CANVAS_HEIGHT - boxH) / 2;
+
+                ctx.fillStyle = '#1a1a2e';
+                ctx.fillRect(boxX, boxY, boxW, boxH);
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 36px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('PAUSA', CONFIG.CANVAS_WIDTH / 2, boxY + 50);
+
+                const options = ['Continuar', 'Nueva Partida', 'Volver al juego'];
+                for (let i = 0; i < 2; i++) {
+                    const optY = boxY + 90 + i * 60;
+                    const isSelected = this.pauseOption === i;
+
+                    if (isSelected) {
+                        ctx.fillStyle = 'rgba(255, 255, 0, 0.15)';
+                        ctx.fillRect(boxX + 20, optY, boxW - 40, 45);
+                        ctx.strokeStyle = '#ffff00';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(boxX + 20, optY, boxW - 40, 45);
+                    }
+
+                    ctx.fillStyle = isSelected ? '#ffff00' : '#fff';
+                    ctx.font = isSelected ? 'bold 24px Arial' : '20px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(options[i], CONFIG.CANVAS_WIDTH / 2, optY + 30);
+                }
+
+                ctx.fillStyle = '#888';
+                ctx.font = '14px Arial';
+                ctx.fillText('ESC / B para volver al juego', CONFIG.CANVAS_WIDTH / 2, boxY + boxH - 20);
+            }
+        }
+
+        // Zone info for intro screens
+        const ZONE_INFO = [
+            { name: 'Villa Roble', arrival: 'Has llegado a Villa Roble, una aldea tranquila donde la vida parecía pacífica… hasta que la desaparición del Santo Grial sumió al reino en el caos. Tu viaje comienza aquí, valiente caballero.', theme: '#22aa44' },
+            { name: 'Arboleda Negra', arrival: 'El aire se vuelve denso, y las ramas de los árboles parecen observarte. La magia del Grial que se perdió ha corrompido este bosque sagrado.', theme: '#116633' },
+            { name: 'Muralla de Hierro', arrival: 'El ruido de los martillos y la armadura resonando indica disciplina y rigor. Sin embargo, hay tensión: la ciudad parece vigilante y hostil.', theme: '#888899' },
+            { name: 'Aldea del Desvarío', arrival: 'Puertas que giran, casas al revés, y habitantes riendo de forma extraña. Este pueblo ha perdido el sentido común desde la desaparición del Grial.', theme: '#aa44aa' },
+            { name: 'Forja Carmesí', arrival: 'El calor es sofocante y el suelo tiembla bajo tus pies. El pueblo se ha convertido en un volcán activo.', theme: '#cc3300' },
+            { name: 'Santuario del Grial', arrival: 'El templo resplandece con la luz que aún queda del Grial. La corrupción y la magia inestable han creado guardianes imposibles de vencer sin cooperación.', theme: '#ddaa00' }
+        ];
+
+        class ZoneIntroScreen extends Screen {
+            constructor(zoneIndex, players) {
+                super();
+                this.zoneIndex = zoneIndex;
+                this.players = players;
+                this.timer = 0;
+                this.inputCooldown = 1.0;
+                this.info = ZONE_INFO[zoneIndex];
+            }
+
+            draw(ctx) {
+                // Dark background with theme color glow
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Theme colored vignette
+                const gradient = ctx.createRadialGradient(
+                    CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, 0,
+                    CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, 500
+                );
+                gradient.addColorStop(0, this.info.theme + '44');
+                gradient.addColorStop(1, '#000000');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Floating particles
+                for (let i = 0; i < 30; i++) {
+                    const x = CONFIG.CANVAS_WIDTH * 0.5 + Math.sin(this.timer * 0.8 + i * 1.2) * 300;
+                    const y = CONFIG.CANVAS_HEIGHT * 0.5 + Math.cos(this.timer * 0.6 + i * 0.9) * 200;
+                    ctx.globalAlpha = Math.sin(this.timer + i) * 0.3 + 0.2;
+                    ctx.fillStyle = this.info.theme;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.globalAlpha = 1;
+
+                // Zone number
+                ctx.fillStyle = '#888';
+                ctx.font = '20px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Zona ${this.zoneIndex + 1} de 6`, CONFIG.CANVAS_WIDTH / 2, 100);
+
+                // Zone name with glow
+                const glow = Math.sin(this.timer * 2) * 0.2 + 0.8;
+                ctx.globalAlpha = glow;
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 56px Arial';
+                ctx.fillText(this.info.name, CONFIG.CANVAS_WIDTH / 2, 180);
+                ctx.globalAlpha = 1;
+
+                // Decorative line
+                ctx.strokeStyle = this.info.theme;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(CONFIG.CANVAS_WIDTH / 2 - 200, 210);
+                ctx.lineTo(CONFIG.CANVAS_WIDTH / 2 + 200, 210);
+                ctx.stroke();
+
+                // Arrival text (word wrapped)
+                ctx.fillStyle = '#ccc';
+                ctx.font = '18px Arial';
+                ctx.textAlign = 'center';
+                const words = this.info.arrival.split(' ');
+                let line = '';
+                let lineY = 270;
+                const maxWidth = CONFIG.CANVAS_WIDTH - 200;
+                for (const word of words) {
+                    const testLine = line + word + ' ';
+                    if (ctx.measureText(testLine).width > maxWidth && line !== '') {
+                        ctx.fillText(line.trim(), CONFIG.CANVAS_WIDTH / 2, lineY);
+                        line = word + ' ';
+                        lineY += 28;
+                    } else {
+                        line = testLine;
+                    }
+                }
+                if (line.trim()) ctx.fillText(line.trim(), CONFIG.CANVAS_WIDTH / 2, lineY);
+
+                // Prompt to continue
+                if (this.inputCooldown <= 0) {
+                    const pulseAlpha = Math.sin(this.timer * 4) * 0.3 + 0.5;
+                    ctx.globalAlpha = pulseAlpha;
+                    ctx.fillStyle = '#ffff00';
+                    ctx.font = '20px Arial';
+                    ctx.fillText('Presiona SPACE o A para entrar', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT - 80);
+                    ctx.globalAlpha = 1;
+                }
+            }
+
+            update(dt) {
+                this.timer += dt;
+                this.inputCooldown = Math.max(0, this.inputCooldown - dt);
+            }
+
+            handleInput(inputManager) {
+                if (this.inputCooldown > 0) return null;
+                if (inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter') || inputManager.anyGamepadConfirm()) {
+                    return 'START_ZONE';
+                }
+                return null;
+            }
+        }
+
+        class UpgradeScreen extends Screen {
+            constructor(players, currentZoneIndex) {
+                super();
+                this.players = players;
+                this.currentZoneIndex = currentZoneIndex;
+                this.currentPlayerIndex = 0;
+                this.selectedOption = 0; // 0: Subir Nivel, 1: Curar, 2: Continuar
+                this.inputCooldown = 0;
+                this.timer = 0;
+            }
+
+            draw(ctx) {
+                // Dark background with golden border
+                const gradient = ctx.createLinearGradient(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                gradient.addColorStop(0, '#1a1a2e');
+                gradient.addColorStop(1, '#16213e');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                const player = this.players[this.currentPlayerIndex];
+
+                // Title
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 40px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Mejoras - Jugador ${this.currentPlayerIndex + 1}`, CONFIG.CANVAS_WIDTH / 2, 50);
+
+                // Player info box
+                const infoX = 100, infoY = 100;
+                const infoW = CONFIG.CANVAS_WIDTH - 200, infoH = 140;
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(infoX, infoY, infoW, infoH);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 20px Arial';
+                ctx.textAlign = 'left';
+                ctx.fillText(`${player.classStats.name} Nv.${player.level}`, infoX + 20, infoY + 35);
+                ctx.fillText(`Monedas: ${player.coins}`, infoX + 20, infoY + 65);
+                ctx.fillText(`HP: ${player.hp}/${player.maxHp}`, infoX + 20, infoY + 95);
+
+                // Stats bars
+                const statX = infoX + infoW / 2;
+                ctx.font = '14px Arial';
+                ctx.fillStyle = '#aaa';
+                ctx.textAlign = 'left';
+
+                const barY = infoY + 40;
+                const barHeight = 16;
+                const barWidth = 150;
+
+                // ATK bar
+                ctx.fillText('ATK', statX, barY);
+                ctx.fillStyle = '#ff6b6b';
+                ctx.fillRect(statX + 40, barY - 10, (player.classStats.attack / 25) * barWidth, barHeight);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(statX + 40, barY - 10, barWidth, barHeight);
+
+                // DEF bar
+                ctx.fillStyle = '#4a9aff';
+                ctx.fillText('DEF', statX, barY + 30);
+                ctx.fillRect(statX + 40, barY + 20, (player.classStats.defense / 10) * barWidth, barHeight);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(statX + 40, barY + 20, barWidth, barHeight);
+
+                // SPD bar
+                ctx.fillStyle = '#ffcc00';
+                ctx.fillText('SPD', statX, barY + 60);
+                ctx.fillRect(statX + 40, barY + 50, (player.classStats.speed / 350) * barWidth, barHeight);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(statX + 40, barY + 50, barWidth, barHeight);
+
+                // Options
+                const optionsY = 280;
+                const optionHeight = 80;
+                const options = [
+                    { label: 'Subir Nivel', cost: player.getLevelCost(player.level + 1), canAfford: player.level < 10 && player.coins >= player.getLevelCost(player.level + 1) },
+                    { label: 'Curar', cost: 5, canAfford: player.coins >= 5 },
+                    { label: 'Continuar', cost: 0, canAfford: true }
+                ];
+
+                for (let i = 0; i < options.length; i++) {
+                    const opt = options[i];
+                    const optY = optionsY + i * optionHeight;
+                    const isSelected = this.selectedOption === i;
+
+                    // Highlight selected
+                    if (isSelected) {
+                        ctx.globalCompositeOperation = 'lighter';
+                        ctx.globalAlpha = 0.2;
+                        ctx.fillStyle = '#ffff00';
+                        ctx.fillRect(150, optY, CONFIG.CANVAS_WIDTH - 300, optionHeight - 10);
+                        ctx.globalAlpha = 1;
+                        ctx.globalCompositeOperation = 'source-over';
+
+                        ctx.strokeStyle = '#ffff00';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(150, optY, CONFIG.CANVAS_WIDTH - 300, optionHeight - 10);
+                    }
+
+                    // Label
+                    ctx.fillStyle = isSelected ? '#ffff00' : '#fff';
+                    ctx.font = isSelected ? 'bold 24px Arial' : '20px Arial';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(opt.label, 180, optY + 25);
+
+                    // Cost
+                    const costText = opt.label === 'Continuar' ? '' : `Costo: ${opt.cost} monedas`;
+                    ctx.fillStyle = opt.canAfford ? '#aaffaa' : '#ff6666';
+                    ctx.font = '14px Arial';
+                    ctx.fillText(costText, 180, optY + 50);
+
+                    // Status
+                    if (opt.label === 'Subir Nivel' && player.level >= 10) {
+                        ctx.fillStyle = '#ff6666';
+                        ctx.fillText('(Máximo nivel alcanzado)', 450, optY + 25);
+                    }
+                }
+
+                // Instructions
+                ctx.fillStyle = '#666';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Jugador ${this.currentPlayerIndex + 1} de ${this.players.length} | W/S o Flechas para navegar, SPACE/Enter/A para confirmar`, CONFIG.CANVAS_WIDTH / 2, 660);
+            }
+
+            update(dt) {
+                this.timer += dt;
+            }
+
+            handleInput(inputManager) {
+                this.inputCooldown = Math.max(0, this.inputCooldown - 0.016);
+                if (this.inputCooldown > 0) return null;
+
+                const player = this.players[this.currentPlayerIndex];
+                const kbUp = inputManager.isKeyPressed('ArrowUp') || inputManager.isKeyPressed('w') || inputManager.isKeyPressed('W');
+                const kbDown = inputManager.isKeyPressed('ArrowDown') || inputManager.isKeyPressed('s') || inputManager.isKeyPressed('S');
+                const kbConfirm = inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter');
+
+                if (kbUp || inputManager.anyGamepadUp()) {
+                    this.selectedOption = (this.selectedOption - 1 + 3) % 3;
+                    this.inputCooldown = 0.2;
+                }
+                if (kbDown || inputManager.anyGamepadDown()) {
+                    this.selectedOption = (this.selectedOption + 1) % 3;
+                    this.inputCooldown = 0.2;
+                }
+
+                if (kbConfirm || inputManager.anyGamepadConfirm()) {
+                    if (this.selectedOption === 0) {
+                        // Level up
+                        if (player.level < 10 && player.coins >= player.getLevelCost(player.level + 1)) {
+                            player.levelUp();
+                            audioSystem.playSfx('levelup');
+                            this.inputCooldown = 0.3;
+                        }
+                    } else if (this.selectedOption === 1) {
+                        // Heal
+                        if (player.coins >= 5) {
+                            player.coins -= 5;
+                            player.heal(player.maxHp);
+                            audioSystem.playSfx('levelup');
+                            this.inputCooldown = 0.3;
+                        }
+                    } else if (this.selectedOption === 2) {
+                        // Continue
+                        this.currentPlayerIndex++;
+                        if (this.currentPlayerIndex >= this.players.length) {
+                            return 'SHOP_DONE';
+                        }
+                        this.selectedOption = 0;
+                        this.inputCooldown = 0.3;
+                    }
+                }
+
+                return null;
+            }
+        }
+
+        class ZoneCompleteScreen extends Screen {
+            constructor(zoneIndex, players, zoneName) {
+                super();
+                this.zoneIndex = zoneIndex;
+                this.players = players;
+                this.zoneName = zoneName || '';
+                this.timer = 0;
+                this.inputCooldown = 0.5;
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Glow effect
+                const glow = Math.sin(this.timer * 3) * 0.3 + 0.7;
+                ctx.globalAlpha = glow;
+                ctx.fillStyle = '#ffd700';
+                ctx.font = 'bold 64px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('¡MUNDO SUPERADO!', CONFIG.CANVAS_WIDTH / 2, 200);
+                ctx.globalAlpha = 1;
+
+                ctx.fillStyle = '#ffff00';
+                ctx.font = 'bold 48px Arial';
+                ctx.fillText('¡FELICIDADES!', CONFIG.CANVAS_WIDTH / 2, 290);
+
+                ctx.fillStyle = '#aaa';
+                ctx.font = '24px Arial';
+                ctx.fillText(this.zoneName, CONFIG.CANVAS_WIDTH / 2, 350);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = '22px Arial';
+                ctx.fillText('Presiona SPACE o A para continuar', CONFIG.CANVAS_WIDTH / 2, 450);
+            }
+
+            update(dt) {
+                this.timer += dt;
+                this.inputCooldown = Math.max(0, this.inputCooldown - dt);
+            }
+
+            handleInput(inputManager) {
+                if (this.inputCooldown > 0) return null;
+                if (inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter') || inputManager.anyGamepadConfirm()) {
+                    return 'SHOW_SHOP';
+                }
+                return null;
+            }
+        }
+
+        class VictoryScreen extends Screen {
+            constructor() {
+                super();
+                this.timer = 0;
+            }
+
+            draw(ctx) {
+                // Golden glow background
+                const gradient = ctx.createRadialGradient(CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, 0, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, Math.sqrt(CONFIG.CANVAS_WIDTH ** 2 + CONFIG.CANVAS_HEIGHT ** 2));
+                gradient.addColorStop(0, '#664400');
+                gradient.addColorStop(1, '#001a00');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                // Confetti
+                for (let i = 0; i < 50; i++) {
+                    const x = CONFIG.CANVAS_WIDTH * Math.sin(this.timer + i) * 0.5 + CONFIG.CANVAS_WIDTH / 2 + i * 10;
+                    const y = ((this.timer * 200 + i * 50) % CONFIG.CANVAS_HEIGHT);
+                    ctx.fillStyle = ['#ffff00', '#ff6600', '#00ff00', '#ff00ff'][i % 4];
+                    ctx.fillRect(x % CONFIG.CANVAS_WIDTH, y, 4, 4);
+                }
+
+                // Grail
+                const grailX = CONFIG.CANVAS_WIDTH / 2;
+                const grailY = 150 + Math.sin(this.timer * 3) * 10;
+                ctx.globalCompositeOperation = 'lighter';
+                for (let i = 0; i < 3; i++) {
+                    ctx.globalAlpha = (1 - i / 3) * 0.4;
+                    ctx.fillStyle = '#ffd700';
+                    ctx.fillRect(grailX - 40 - i * 5, grailY - 30 - i * 5, 80 + i * 10, 60 + i * 10);
+                }
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+
+                ctx.fillStyle = '#ffff99';
+                ctx.fillRect(grailX - 40, grailY - 30, 80, 60);
+
+                // Text
+                ctx.fillStyle = '#ffff00';
+                ctx.font = 'bold 72px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('¡VICTORIA!', CONFIG.CANVAS_WIDTH / 2, 270);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = '28px Arial';
+                ctx.fillText('¡Has recuperado el Santo Grial!', CONFIG.CANVAS_WIDTH / 2, 330);
+                ctx.fillText('Presiona SPACE o A para continuar', CONFIG.CANVAS_WIDTH / 2, 380);
+            }
+
+            update(dt) {
+                this.timer += dt;
+            }
+
+            handleInput(inputManager) {
+                if (inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter') || inputManager.anyGamepadConfirm()) {
+                    return 'TITLE';
+                }
+                return null;
+            }
+        }
+
+        class GameOverScreen extends Screen {
+            constructor() {
+                super();
+                this.timer = 0;
+            }
+
+            draw(ctx) {
+                // Red vignette
+                const gradient = ctx.createRadialGradient(CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, 0, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2, 600);
+                gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+                gradient.addColorStop(1, 'rgba(255, 0, 0, 0.5)');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                ctx.fillStyle = '#8b0000';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                ctx.globalAlpha = 0.5;
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+                ctx.globalAlpha = 1;
+
+                // Text
+                ctx.fillStyle = '#ff0000';
+                ctx.font = 'bold 72px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('GAME OVER', CONFIG.CANVAS_WIDTH / 2, 250);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = '28px Arial';
+                ctx.fillText('Has caído en combate...', CONFIG.CANVAS_WIDTH / 2, 330);
+                ctx.fillText('Presiona SPACE o A para reintentar', CONFIG.CANVAS_WIDTH / 2, 380);
+            }
+
+            update(dt) {
+                this.timer += dt;
+            }
+
+            handleInput(inputManager) {
+                if (inputManager.isKeyPressed(' ') || inputManager.isKeyPressed('Enter') || inputManager.anyGamepadConfirm()) {
+                    return 'TITLE';
+                }
+                return null;
+            }
+        }
+
+        // ==================== JUEGO PRINCIPAL ====================
+        class Game {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+                this.ctx.imageSmoothingEnabled = false;
+
+                // Ajustar canvas al tamaño de la ventana
+                this.resizeCanvas();
+                window.addEventListener('resize', () => this.resizeCanvas());
+
+                this.state = 'TITLE';
+                this.currentScreen = new TitleScreen();
+                this.selectedClasses = [];
+                this.playerCount = 1;
+                this.lastTime = Date.now();
+            }
+
+            resizeCanvas() {
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+            }
+
+            changeState(newState) {
+                if (typeof newState === 'object') {
+                    if (newState.selectedClasses) this.selectedClasses = newState.selectedClasses;
+                    if (newState.playerCount) this.playerCount = newState.playerCount;
+                    this.state = newState.nextState;
+                } else {
+                    this.state = newState;
+                }
+
+                // Crear nueva pantalla según el estado
+                switch (this.state) {
+                    case 'TITLE':
+                        this.currentScreen = new TitleScreen();
+                        break;
+                    case 'PLAYER_COUNT_SELECT':
+                        this.currentScreen = new PlayerCountSelectScreen();
+                        break;
+                    case 'DIFFICULTY_SELECT':
+                        this.currentScreen = new DifficultySelectScreen();
+                        break;
+                    case 'CHARACTER_SELECT':
+                        this.currentScreen = new CharacterSelectScreen(this.playerCount);
+                        break;
+                    case 'PLAYING':
+                        // First zone: show intro screen first
+                        this.currentScreen = new ZoneIntroScreen(0, null);
+                        this.state = 'ZONE_INTRO';
+                        this._pendingPlayers = null;
+                        this._pendingZone = 0;
+                        break;
+                    case 'START_ZONE':
+                        // Actually start gameplay
+                        if (this._pendingPlayers) {
+                            // Coming from shop - reuse players
+                            const gpFromIntro = new GameplayScreen(this.selectedClasses);
+                            gpFromIntro.currentZoneIndex = this._pendingZone;
+                            gpFromIntro.players = this._pendingPlayers;
+                            gpFromIntro.loadZone(this._pendingZone);
+                            this.currentScreen = gpFromIntro;
+                        } else {
+                            // New game - first zone
+                            this.currentScreen = new GameplayScreen(this.selectedClasses);
+                        }
+                        this.state = 'PLAYING_ACTIVE';
+                        break;
+                    case 'ZONE_COMPLETE':
+                        const completedZone = this.currentScreen.currentZoneIndex;
+                        const completedPlayers = this.currentScreen.players;
+                        const completedZoneName = this.currentScreen.zone ? this.currentScreen.zone.name : '';
+                        if (completedZone >= 5) {
+                            this.currentScreen = new VictoryScreen();
+                            this.state = 'VICTORY';
+                        } else {
+                            this.currentScreen = new ZoneCompleteScreen(completedZone, completedPlayers, completedZoneName);
+                            this.state = 'ZONE_COMPLETE_SCREEN';
+                        }
+                        break;
+                    case 'SHOW_SHOP':
+                        this.currentScreen = new UpgradeScreen(this.currentScreen.players, this.currentScreen.zoneIndex);
+                        this.state = 'UPGRADE_SHOP';
+                        break;
+                    case 'SHOP_DONE':
+                        const nextZoneFromShop = this.currentScreen.currentZoneIndex + 1;
+                        this._pendingPlayers = this.currentScreen.players;
+                        this._pendingZone = nextZoneFromShop;
+                        this.currentScreen = new ZoneIntroScreen(nextZoneFromShop, this.currentScreen.players);
+                        this.state = 'ZONE_INTRO';
+                        break;
+                    case 'ZONE_1':
+                        this.currentScreen = new GameplayScreen(this.selectedClasses);
+                        this.currentScreen.loadZone(1);
+                        break;
+                    case 'ZONE_2':
+                        this.currentScreen.loadZone(2);
+                        break;
+                    case 'ZONE_3':
+                        this.currentScreen.loadZone(3);
+                        break;
+                    case 'ZONE_4':
+                        this.currentScreen.loadZone(4);
+                        break;
+                    case 'ZONE_5':
+                        this.currentScreen.loadZone(5);
+                        break;
+                    case 'VICTORY':
+                        this.currentScreen = new VictoryScreen();
+                        break;
+                    case 'GAME_OVER':
+                        this.currentScreen = new GameOverScreen();
+                        break;
+                }
+            }
+
+            update(dt) {
+                inputManager.update();
+
+                let nextState = this.currentScreen.update(dt);
+                if (nextState) {
+                    this.changeState(nextState);
+                }
+
+                let inputResult = this.currentScreen.handleInput(inputManager);
+                if (inputResult) {
+                    this.changeState(inputResult);
+                }
+
+                inputManager.endFrame();
+            }
+
+            draw() {
+                this.ctx.fillStyle = '#000';
+                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // Escalar el contenido del juego
+                const scaleX = this.canvas.width / CONFIG.CANVAS_WIDTH;
+                const scaleY = this.canvas.height / CONFIG.CANVAS_HEIGHT;
+                const scale = Math.min(scaleX, scaleY);
+
+                this.ctx.save();
+                this.ctx.scale(scale, scale);
+
+                this.currentScreen.draw(this.ctx);
+
+                this.ctx.restore();
+            }
+
+            loop() {
+                const currentTime = Date.now();
+                const dt = (currentTime - this.lastTime) / 1000;
+                this.lastTime = currentTime;
+
+                this.update(dt);
+                this.draw();
+
+                requestAnimationFrame(() => this.loop());
+            }
+
+            start() {
+                this.loop();
+            }
+        }
+
+        // ==================== INICIALIZACIÓN ====================
+        window.addEventListener('load', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const game = new Game(canvas);
+            game.start();
+        });
+    </script>
+</body>
+</html>
+
